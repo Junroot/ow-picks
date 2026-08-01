@@ -9,8 +9,8 @@ overwatch.blizzard.com/ko-kr/rates/ 페이지는 서버 렌더링이라 페이�
 (input, rq, tier, map, region) 조합 하나당 1회 요청으로 전 역할 데이터를 얻는다.
 
 출력:
-  site/data/meta.json                       영웅/맵/필터 메타데이터
-  site/data/{input}_{tier}_{region}.json    맵 31개 × 영웅 전체의 원본 수치
+  site/data/meta.json                  영웅/맵/필터 메타데이터
+  site/data/PC_{tier}_{region}.json    맵 31개 × 영웅 전체의 원본 수치
 
 유효 픽률은 저장하지 않는다. 원본 수치만 저장하고 화면에서 계산한다.
 """
@@ -38,6 +38,10 @@ USER_AGENT = "ow-picks/1.0 (effective pick rate calculator; +https://github.com/
 # 경쟁전 - 역할 고정. 빠른 대전(rq=0)은 밴이 없어 유효 픽률 = 원본 픽률이라 수집하지 않는다.
 RQ = "1"
 
+# 마우스·키보드만. 컨트롤러(Console)는 요청·데이터가 두 배로 늘어나는데 메타가 크게
+# 달라 함께 보기도 어려워 수집하지 않는다.
+INPUT = "PC"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "site" / "data"
 
@@ -59,7 +63,7 @@ _OPTION_RE = re.compile(r'<option[^>]*value="([^"]*)"', re.S)
 _VALUE_RE = re.compile(r'value="([^"]*)"')
 _OPTION_RQS_RE = re.compile(r'data-rqs="([^"]*)"')
 _SELECT_RE = re.compile(
-    r'<select[^>]*data-label="(input|tier|region)".*?</select>', re.S | re.I
+    r'<select[^>]*data-label="(tier|region)".*?</select>', re.S | re.I
 )
 
 _print_lock = threading.Lock()
@@ -178,30 +182,23 @@ def extract_maps(page: str) -> list[dict]:
 
 
 def extract_filter_options(page: str) -> dict[str, list[str]]:
-    """입력장치·티어·지역 선택 상자의 값 목록. 새 티어나 지역이 생기면 그대로 따라온다."""
+    """티어·지역 선택 상자의 값 목록. 새 티어나 지역이 생기면 그대로 따라온다."""
     options: dict[str, list[str]] = {}
     for select in _SELECT_RE.finditer(page):
         options[select.group(1)] = _OPTION_RE.findall(select.group(0))
     return options
 
 
-def shard_name(input_device: str, tier: str, region: str) -> str:
-    return f"{input_device}_{tier}_{region}.json"
+def shard_name(tier: str, region: str) -> str:
+    return f"{INPUT}_{tier}_{region}.json"
 
 
-def build_shard(
-    input_device: str,
-    tier: str,
-    region: str,
-    maps: list[dict],
-    *,
-    delay: float,
-) -> dict:
+def build_shard(tier: str, region: str, maps: list[dict], *, delay: float) -> dict:
     per_map: dict[str, dict[str, list[float | None]]] = {}
     # 'all-maps' 는 맵 편차를 재는 기준선으로 함께 받아둔다.
     for slug in ["all-maps"] + [game_map["slug"] for game_map in maps]:
         params = {
-            "input": input_device,
+            "input": INPUT,
             "map": slug,
             "region": region,
             "rq": RQ,
@@ -211,9 +208,9 @@ def build_shard(
         per_map[slug] = extract_stats(page)
         if delay:
             time.sleep(delay)
-    log(f"완료: {input_device} / {tier} / {region} ({len(per_map)}개 맵)")
+    log(f"완료: {tier} / {region} ({len(per_map)}개 맵)")
     return {
-        "input": input_device,
+        "input": INPUT,
         "rq": RQ,
         "tier": tier,
         "region": region,
@@ -245,7 +242,6 @@ def main() -> int:
         "--tiers", help="쉼표로 구분한 티어 목록 (기본: 사이트의 전체 티어)"
     )
     parser.add_argument("--regions", help="쉼표로 구분한 지역 목록")
-    parser.add_argument("--inputs", help="쉼표로 구분한 입력장치 목록")
     parser.add_argument(
         "--limit-maps",
         type=int,
@@ -256,7 +252,7 @@ def main() -> int:
     log("메타데이터 수집 중...")
     seed = fetch_html(
         {
-            "input": "PC",
+            "input": INPUT,
             "map": "all-maps",
             "region": "Asia",
             "rq": RQ,
@@ -267,9 +263,6 @@ def main() -> int:
     maps = extract_maps(seed)
     filters = extract_filter_options(seed)
 
-    inputs = (
-        args.inputs.split(",") if args.inputs else filters.get("input", ["PC", "Console"])
-    )
     tiers = args.tiers.split(",") if args.tiers else filters.get("tier", ["All"])
     regions = (
         args.regions.split(",")
@@ -279,7 +272,7 @@ def main() -> int:
     if args.limit_maps:
         maps = maps[: args.limit_maps]
 
-    combos = [(i, t, r) for i in inputs for t in tiers for r in regions]
+    combos = [(t, r) for t in tiers for r in regions]
     log(
         f"영웅 {len(heroes)}명 / 맵 {len(maps)}개(+기준선) / 샤드 {len(combos)}개 "
         f"= 요청 {len(combos) * (len(maps) + 1)}건"
@@ -289,12 +282,12 @@ def main() -> int:
     total_bytes = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(build_shard, i, t, r, maps, delay=args.delay): (i, t, r)
-            for i, t, r in combos
+            pool.submit(build_shard, t, r, maps, delay=args.delay): (t, r)
+            for t, r in combos
         }
-        for future, (i, t, r) in futures.items():
+        for future, (t, r) in futures.items():
             shard = future.result()
-            total_bytes += write_json(DATA_DIR / shard_name(i, t, r), shard)
+            total_bytes += write_json(DATA_DIR / shard_name(t, r), shard)
 
     write_json(
         DATA_DIR / "meta.json",
@@ -302,9 +295,9 @@ def main() -> int:
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "source": BASE_URL,
             "rq": RQ,
+            "input": INPUT,
             "heroes": heroes,
             "maps": maps,
-            "inputs": inputs,
             "tiers": tiers,
             "regions": regions,
         },
