@@ -1,0 +1,76 @@
+name: 통계 갱신 및 배포
+
+on:
+  schedule:
+    # 매일 20:00 UTC = 05:00 KST. 공식 통계는 패치 후 최대 하루 뒤에 반영된다.
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 배포는 겹치지 않게. 진행 중인 배포를 취소하지는 않는다.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 요청 1,488건 (입력장치 2 × 티어 8 × 지역 3 × (맵 30 + 기준선)). 약 3~6분.
+      - name: 영웅 통계 수집
+        run: python scripts/fetch_rates.py --workers 4 --delay 0.3
+
+      - name: 수집 결과 확인
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          data = pathlib.Path('site/data')
+          shards = sorted(p for p in data.glob('*.json') if p.name != 'meta.json')
+          meta = json.loads((data / 'meta.json').read_text(encoding='utf-8'))
+          expected = len(meta['inputs']) * len(meta['tiers']) * len(meta['regions'])
+          heroes, maps = len(meta['heroes']), len(meta['maps'])
+          print(f'샤드 {len(shards)}/{expected}, 영웅 {heroes}, 맵 {maps}')
+          problems = []
+          if len(shards) != expected:
+              problems.append(f'샤드 수가 맞지 않습니다 ({len(shards)} != {expected})')
+          # 하한선은 파싱이 깨졌을 때를 잡기 위한 것이다. 영웅이나 맵이 늘어나는 것은 통과한다.
+          if heroes < 30:
+              problems.append(f'영웅이 {heroes}명뿐입니다. 페이지 구조가 바뀐 것 같습니다')
+          if maps < 20:
+              problems.append(f'맵이 {maps}개뿐입니다. 페이지 구조가 바뀐 것 같습니다')
+          # 모든 샤드가 meta 의 맵을 전부 담고 있는지 (기준선 all-maps 포함)
+          for path in shards:
+              shard = json.loads(path.read_text(encoding='utf-8'))
+              if len(shard['maps']) != maps + 1:
+                  problems.append(f'{path.name}: 맵 {len(shard["maps"])}개 (기대 {maps + 1})')
+          if problems:
+              sys.exit('배포하지 않습니다 — ' + '; '.join(problems[:5]))
+          PY
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

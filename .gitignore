@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# 수집기 산출물 — Actions 가 매번 새로 만든다.
+site/data/
+
+# 셸 따옴표 실수로 생긴 폴더
+~/

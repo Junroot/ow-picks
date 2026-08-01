@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>오버워치 유효 픽률</title>
+<meta name="description" content="밴률을 보정한 오버워치 영웅 유효 픽률. 맵별·티어별로 실제로 뽑히는 영웅을 확인하세요.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="titles">
+    <h1>오버워치 유효 픽률</h1>
+    <p class="sub">밴당한 경기를 제외하고 다시 계산한 픽률 — <b>유효 픽률 = 픽률 &divide; (1 &minus; 밴률)</b></p>
+  </div>
+  <div class="updated" id="updated"></div>
+</header>
+
+<nav class="tabs" id="tabs" role="tablist">
+  <button role="tab" class="tab active" data-view="maps">맵별 상위 영웅</button>
+  <button role="tab" class="tab" data-view="ranking">전체 순위</button>
+  <button role="tab" class="tab" data-view="tiers">티어별 추이</button>
+</nav>
+
+<section class="filters" id="filters">
+  <label>입력장치
+    <select id="f-input"></select>
+  </label>
+  <label>등급
+    <select id="f-tier"></select>
+  </label>
+  <label>지역
+    <select id="f-region"></select>
+  </label>
+  <label data-only="ranking">전장
+    <select id="f-map"></select>
+  </label>
+  <label data-only="maps">표시 개수
+    <select id="f-topn">
+      <option value="3" selected>역할별 3개</option>
+      <option value="5">역할별 5개</option>
+      <option value="99">전체</option>
+    </select>
+  </label>
+  <!-- 역할·등급·지역·전장·영웅 목록은 data/meta.json 을 보고 app.js 가 채운다. -->
+  <label data-only="ranking">역할
+    <select id="f-role"></select>
+  </label>
+  <label data-only="tiers">영웅
+    <select id="f-hero"></select>
+  </label>
+  <label data-only="tiers">전장
+    <select id="f-map2"></select>
+  </label>
+</section>
+
+<main id="main" aria-live="polite">
+  <p class="loading">데이터를 불러오는 중...</p>
+</main>
+
+<footer>
+  <p>
+    원본 데이터: <a href="https://overwatch.blizzard.com/ko-kr/rates/" target="_blank" rel="noopener">오버워치 공식 영웅 통계</a>
+    (경쟁전 &middot; 역할 고정). 하루 1회 갱신하며, 공식 통계는 패치 시작 시점 스냅샷입니다.
+  </p>
+  <p class="fine">
+    픽률은 플레이 시간 기준 점유율이라 역할 내 합계가 슬롯 수만큼(돌격 100%, 공격·지원 200%) 됩니다.
+    유효 픽률은 밴당한 경기를 분모에서 제외한 근사치입니다 —
+    분모의 다른 영웅 플레이 시간도 밴 상황에 따라 변하므로, 밴률이 높은 영웅일수록 오차가 커집니다.
+    이 사이트는 블리자드와 무관한 비공식 도구입니다.
+  </p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
