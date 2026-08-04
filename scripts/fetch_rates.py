@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import html
+import http.cookiejar
 import json
 import re
 import sys
@@ -33,7 +34,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_URL = "https://overwatch.blizzard.com/ko-kr/rates/"
-USER_AGENT = "ow-picks/1.0 (effective pick rate calculator; +https://github.com/)"
+
+# 도구 이름을 밝힌 User-Agent 로는 GitHub Actions 러너에서 403 이 떨어졌다(집 회선에서는
+# 같은 요청이 통과한다). 브라우저가 보내는 것과 같은 헤더 묶음으로 맞춘다.
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Encoding": "gzip",
+    "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# 첫 응답이 내려주는 locale/session 쿠키를 이후 요청에 그대로 실어 보낸다. 사람이 필터를
+# 바꿔가며 보는 흐름과 같아진다. CookieJar 는 내부 잠금이 있어 여러 워커가 함께 써도 된다.
+_OPENER = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+)
 
 # 경쟁전 - 역할 고정. 빠른 대전(rq=0)은 밴이 없어 유효 픽률 = 원본 픽률이라 수집하지 않는다.
 # 값은 사이트 사정으로 바뀔 수 있다(경쟁전은 1 -> 2 로 바뀐 적이 있다). 없는 값을 주면
@@ -77,25 +104,56 @@ def log(*args: object) -> None:
         print(*args, file=sys.stderr, flush=True)
 
 
-def fetch_html(params: dict[str, str], *, retries: int = 4) -> str:
+def _describe_http_error(error: urllib.error.HTTPError) -> str:
+    """차단당했을 때 원인을 로그만 보고 알 수 있도록 응답을 요약한다.
+
+    WAF 는 보통 응답 헤더나 본문에 식별자를 남긴다. 그게 없으면 다음 실패 때
+    또 맨손으로 추측해야 한다.
+    """
+    interesting = ("server", "cf-ray", "x-akamai-request-id", "retry-after")
+    headers = " ".join(
+        f"{name}={value}"
+        for name, value in error.headers.items()
+        if name.lower() in interesting
+    )
+    try:
+        body = error.read(400).decode("utf-8", errors="replace")
+    except Exception:  # 본문을 못 읽는다고 재시도까지 막을 이유는 없다
+        body = ""
+    body = " ".join(body.split())
+    return f"HTTP {error.code} [{headers}] {body}"
+
+
+def fetch_html(params: dict[str, str], *, retries: int = 5) -> str:
     query = urllib.parse.urlencode(params)
     url = f"{BASE_URL}?{query}"
     last_error: Exception | None = None
     for attempt in range(retries):
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept-Encoding": "gzip",
-                "Accept-Language": "ko-KR,ko;q=0.9",
-            },
-        )
+        request = urllib.request.Request(url, headers=HEADERS)
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with _OPENER.open(request, timeout=30) as response:
                 raw = response.read()
                 if response.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
                 return raw.decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as error:
+            last_error = error
+            detail = _describe_http_error(error)
+            if error.code in (403, 429, 503):
+                # 차단·속도 제한은 몇 초 기다린다고 풀리지 않는다. 서버가 Retry-After 를
+                # 주면 따르고, 아니면 15초부터 최대 2분까지 늘려가며 기다린다.
+                retry_after = error.headers.get("Retry-After")
+                backoff = (
+                    int(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else min(15 * 2**attempt, 120)
+                )
+            elif 400 <= error.code < 500:
+                raise RuntimeError(f"요청 실패: {url} — {detail}") from error
+            else:
+                backoff = 2**attempt
+            log(f"  재시도 {attempt + 1}/{retries} ({detail}) — {backoff}초 후")
+            time.sleep(backoff)
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             last_error = error
             backoff = 2**attempt

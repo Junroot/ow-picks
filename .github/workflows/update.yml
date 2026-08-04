@@ -28,9 +28,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 요청 744건 (티어 8 × 지역 3 × (맵 30 + 기준선)). 약 2~3분.
+      # 요청 744건 (티어 8 × 지역 3 × (맵 30 + 기준선)). 약 6~8분.
+      # 러너에서 403 을 맞은 적이 있어 동시 요청과 간격을 넉넉하게 잡았다. 하루 1회
+      # 도는 작업이라 몇 분 더 걸리는 편이 차단당하는 것보다 낫다.
       - name: 영웅 통계 수집
-        run: python scripts/fetch_rates.py --workers 4 --delay 0.3
+        run: python scripts/fetch_rates.py --workers 2 --delay 0.6
 
       - name: 수집 결과 확인
         run: |
