@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 요청 1,488건 (입력장치 2 × 티어 8 × 지역 3 × (맵 30 + 기준선)). 약 3~6분.
+      # 요청 744건 (티어 8 × 지역 3 × (맵 30 + 기준선)). 약 2~3분.
       - name: 영웅 통계 수집
         run: python scripts/fetch_rates.py --workers 4 --delay 0.3
 
@@ -39,7 +39,7 @@ jobs:
           data = pathlib.Path('site/data')
           shards = sorted(p for p in data.glob('*.json') if p.name != 'meta.json')
           meta = json.loads((data / 'meta.json').read_text(encoding='utf-8'))
-          expected = len(meta['inputs']) * len(meta['tiers']) * len(meta['regions'])
+          expected = len(meta['tiers']) * len(meta['regions'])
           heroes, maps = len(meta['heroes']), len(meta['maps'])
           print(f'샤드 {len(shards)}/{expected}, 영웅 {heroes}, 맵 {maps}')
           problems = []

@@ -15,7 +15,6 @@ const TIER_LABEL = {
   Grandmaster: '그랜드마스터 및 챔피언',
 };
 const REGION_LABEL = { Americas: '아메리카', Asia: '아시아', Europe: '유럽' };
-const INPUT_LABEL = { PC: '마우스 및 키보드', Console: '컨트롤러' };
 const BASELINE = 'all-maps';
 const BAN_WARN = 60;      // 이 밴률을 넘으면 보정 배율이 2.5배를 넘어 수치가 불안정하다
 const DENOM_FLOOR = 0.05; // 밴률 95% 이상에서 분모가 0으로 붕괴하는 것을 막는다
@@ -29,7 +28,6 @@ let mapSlugs = [];
 
 const state = {
   view: 'maps',
-  input: 'PC',
   tier: 'All',
   region: 'Asia',
   map: BASELINE,
@@ -78,13 +76,14 @@ function ranked(mapStats, role) {
 /* ---------- 데이터 ---------- */
 
 // meta 의 생성 시각을 붙여, 새 영웅이 들어온 meta 와 낡은 캐시 샤드가 섞이지 않게 한다.
-function shardUrl(input, tier, region) {
+// 수집기는 마우스·키보드(PC)만 받으므로 입력장치는 샤드 이름의 고정 접두사다.
+function shardUrl(tier, region) {
   const version = meta && meta.generatedAt ? `?v=${encodeURIComponent(meta.generatedAt)}` : '';
-  return `data/${input}_${tier}_${region}.json${version}`;
+  return `data/${meta.input || 'PC'}_${tier}_${region}.json${version}`;
 }
 
-function loadShard(input, tier, region) {
-  const url = shardUrl(input, tier, region);
+function loadShard(tier, region) {
+  const url = shardUrl(tier, region);
   if (!shardCache.has(url)) {
     shardCache.set(
       url,
@@ -255,7 +254,7 @@ async function renderTiers() {
   }
   const shards = await Promise.all(
     meta.tiers.map((tier) =>
-      loadShard(state.input, tier, state.region)
+      loadShard(tier, state.region)
         .then((shard) => ({ tier, shard }))
         .catch(() => ({ tier, shard: null }))
     )
@@ -304,7 +303,6 @@ function fillSelect(select, values, labeler) {
 }
 
 function syncControls() {
-  el('f-input').value = state.input;
   el('f-tier').value = state.tier;
   el('f-region').value = state.region;
   el('f-map').value = state.map;
@@ -324,7 +322,7 @@ function syncControls() {
 
 function pushUrl() {
   const params = new URLSearchParams();
-  for (const key of ['view', 'input', 'tier', 'region', 'map', 'map2', 'role', 'topn', 'hero']) {
+  for (const key of ['view', 'tier', 'region', 'map', 'map2', 'role', 'topn', 'hero']) {
     params.set(key, state[key]);
   }
   history.replaceState(null, '', `?${params}`);
@@ -332,7 +330,7 @@ function pushUrl() {
 
 function readUrl() {
   const params = new URLSearchParams(location.search);
-  for (const key of ['view', 'input', 'tier', 'region', 'map', 'map2', 'role', 'topn', 'hero']) {
+  for (const key of ['view', 'tier', 'region', 'map', 'map2', 'role', 'topn', 'hero']) {
     if (params.has(key)) state[key] = params.get(key);
   }
 }
@@ -345,7 +343,6 @@ function validateState() {
     if (!allowed.includes(state[key])) state[key] = first;
   };
   fallback('view', ['maps', 'ranking', 'tiers'], 'maps');
-  fallback('input', meta.inputs, meta.inputs[0]);
   fallback('tier', meta.tiers, meta.tiers[0]);
   fallback('region', meta.regions, meta.regions[0]);
   fallback('map', mapSlugs, BASELINE);
@@ -365,7 +362,7 @@ async function render() {
       await renderTiers();
       return;
     }
-    const shard = await loadShard(state.input, state.tier, state.region);
+    const shard = await loadShard(state.tier, state.region);
     if (state.view === 'ranking') renderRanking(shard);
     else renderMaps(shard);
   } catch (error) {
@@ -392,7 +389,6 @@ async function init() {
   const mapLabel = (slug) =>
     slug === BASELINE ? '모든 전장' : (meta.maps.find((m) => m.slug === slug) || {}).name || slug;
 
-  fillSelect(el('f-input'), meta.inputs, (v) => INPUT_LABEL[v] || v);
   fillSelect(el('f-tier'), meta.tiers, (v) => TIER_LABEL[v] || v);
   fillSelect(el('f-region'), meta.regions, (v) => REGION_LABEL[v] || v);
   fillSelect(el('f-map'), mapSlugs, mapLabel);
@@ -430,7 +426,6 @@ async function init() {
       state[key] = event.target.value;
       render();
     });
-  bind('f-input', 'input');
   bind('f-tier', 'tier');
   bind('f-region', 'region');
   bind('f-map', 'map');
