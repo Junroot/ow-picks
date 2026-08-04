@@ -36,7 +36,10 @@ BASE_URL = "https://overwatch.blizzard.com/ko-kr/rates/"
 USER_AGENT = "ow-picks/1.0 (effective pick rate calculator; +https://github.com/)"
 
 # 경쟁전 - 역할 고정. 빠른 대전(rq=0)은 밴이 없어 유효 픽률 = 원본 픽률이라 수집하지 않는다.
-RQ = "1"
+# 값은 사이트 사정으로 바뀔 수 있다(경쟁전은 1 -> 2 로 바뀐 적이 있다). 없는 값을 주면
+# 서버는 오류 대신 빠른 대전으로 조용히 폴백하므로, 아래 extract_maps 에서 맵 목록의
+# data-rqs 와 대조해 어긋나면 즉시 멈춘다.
+RQ = "2"
 
 # 마우스·키보드만. 컨트롤러(Console)는 요청·데이터가 두 배로 늘어나는데 메타가 크게
 # 달라 함께 보기도 어려워 수집하지 않는다.
@@ -177,6 +180,12 @@ def extract_maps(page: str) -> list[dict]:
                 "name": name or slug_match.group(1),
                 "mode": mode or "기타",
             }
+        )
+    if not maps:
+        seen = sorted({m.group(1) for m in _OPTION_RQS_RE.finditer(select.group(0))})
+        raise ValueError(
+            f"경쟁전(rq={RQ})에 해당하는 맵이 없습니다. 페이지의 data-rqs 값은 "
+            f"{seen} 입니다. RQ 상수를 확인하세요."
         )
     return maps
 
