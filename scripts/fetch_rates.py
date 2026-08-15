@@ -103,6 +103,10 @@ _RQ_OPTION_RE = re.compile(r"<option(?P<attrs>[^>]*)>(?P<label>[^<]*)", re.S)
 
 _print_lock = threading.Lock()
 
+# 속도 제한에 걸리면 이 시각까지 모든 워커가 요청을 멈춘다. _pause_all 참고.
+_throttle_lock = threading.Lock()
+_throttle_until = 0.0
+
 
 def log(*args: object) -> None:
     with _print_lock:
@@ -129,11 +133,42 @@ def _describe_http_error(error: urllib.error.HTTPError) -> str:
     return f"HTTP {error.code} [{headers}] {body}"
 
 
-def fetch_html(params: dict[str, str], *, retries: int = 5) -> str:
+def _backoff_seconds(attempt: int) -> int:
+    """15초에서 시작해 2분까지 늘린다. 속도 제한은 몇 초로는 풀리지 않는다."""
+    return min(15 * 2**attempt, 120)
+
+
+def _pause_all(seconds: float, reason: str) -> None:
+    """모든 워커를 함께 멈춰 세운다.
+
+    서버가 지쳤을 때 워커 하나만 물러나 봐야 소용이 없다. 나머지가 계속 두드리는
+    동안에는 제한이 풀리지 않고, 실제로 그렇게 두 워커가 나란히 재시도를 소진하며
+    수집이 통째로 날아간 적이 있다.
+    """
+    global _throttle_until
+    with _throttle_lock:
+        resume = max(_throttle_until, time.monotonic() + seconds)
+        widened = resume > _throttle_until
+        _throttle_until = resume
+    if widened:
+        log(f"  전체 대기 {seconds:.0f}초 ({reason})")
+
+
+def _await_throttle() -> None:
+    while True:
+        with _throttle_lock:
+            remaining = _throttle_until - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 5))
+
+
+def fetch_html(params: dict[str, str], *, retries: int = 7) -> str:
     query = urllib.parse.urlencode(params)
     url = f"{BASE_URL}?{query}"
     last_error: Exception | None = None
     for attempt in range(retries):
+        _await_throttle()
         request = urllib.request.Request(url, headers=HEADERS)
         try:
             with _OPENER.open(request, timeout=30) as response:
@@ -144,26 +179,25 @@ def fetch_html(params: dict[str, str], *, retries: int = 5) -> str:
         except urllib.error.HTTPError as error:
             last_error = error
             detail = _describe_http_error(error)
-            if error.code in (403, 429, 503):
-                # 차단·속도 제한은 몇 초 기다린다고 풀리지 않는다. 서버가 Retry-After 를
-                # 주면 따르고, 아니면 15초부터 최대 2분까지 늘려가며 기다린다.
-                retry_after = error.headers.get("Retry-After")
-                backoff = (
-                    int(retry_after)
-                    if retry_after and retry_after.isdigit()
-                    else min(15 * 2**attempt, 120)
-                )
-            elif 400 <= error.code < 500:
+            # 4xx 중 차단·속도 제한이 아닌 것은 기다려도 그대로다. 요청 자체가 틀렸다.
+            if 400 <= error.code < 500 and error.code not in (403, 408, 429):
                 raise RuntimeError(f"요청 실패: {url} — {detail}") from error
-            else:
-                backoff = 2**attempt
-            log(f"  재시도 {attempt + 1}/{retries} ({detail}) — {backoff}초 후")
-            time.sleep(backoff)
+            retry_after = error.headers.get("Retry-After")
+            backoff = (
+                int(retry_after)
+                if retry_after and retry_after.isdigit()
+                else _backoff_seconds(attempt)
+            )
+            log(f"  재시도 {attempt + 1}/{retries} ({detail})")
+            _pause_all(backoff, f"HTTP {error.code}")
         except (urllib.error.URLError, TimeoutError, OSError) as error:
+            # 응답이 오다 멎는 것(read timeout)도 사실상 속도 제한이다. 서버는 500 을
+            # 주다가 아예 침묵하는 쪽으로 넘어간다. 잠깐 쉬는 정도로는 회복되지 않아
+            # 5xx 와 똑같이 길게 기다린다.
             last_error = error
-            backoff = 2**attempt
-            log(f"  재시도 {attempt + 1}/{retries} ({error}) — {backoff}초 후")
-            time.sleep(backoff)
+            backoff = _backoff_seconds(attempt)
+            log(f"  재시도 {attempt + 1}/{retries} ({error})")
+            _pause_all(backoff, str(error))
     raise RuntimeError(f"요청 실패: {url}") from last_error
 
 
