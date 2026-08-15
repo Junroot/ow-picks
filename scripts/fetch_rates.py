@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,17 +134,20 @@ def _describe_http_error(error: urllib.error.HTTPError) -> str:
     return f"HTTP {error.code} [{headers}] {body}"
 
 
-def _backoff_seconds(attempt: int) -> int:
-    """15초에서 시작해 2분까지 늘린다. 속도 제한은 몇 초로는 풀리지 않는다."""
-    return min(15 * 2**attempt, 120)
+class Unavailable(RuntimeError):
+    """사이트가 이 조합을 끝내 내려주지 못했다.
+
+    특정 (맵, 티어, 지역) 조합에서 서버가 응답을 시작만 하고 끝맺지 못하는 일이
+    있다. 몇 번을 다시 물어도 똑같고 브라우저로 열어도 마찬가지라, 블리자드 쪽
+    데이터 문제로 보인다. 다른 조합은 멀쩡하니 이 칸만 비우고 넘어간다.
+    """
 
 
 def _pause_all(seconds: float, reason: str) -> None:
     """모든 워커를 함께 멈춰 세운다.
 
-    서버가 지쳤을 때 워커 하나만 물러나 봐야 소용이 없다. 나머지가 계속 두드리는
-    동안에는 제한이 풀리지 않고, 실제로 그렇게 두 워커가 나란히 재시도를 소진하며
-    수집이 통째로 날아간 적이 있다.
+    진짜 속도 제한(403/429/503)일 때만 쓴다. 한 워커만 물러나 봐야 나머지가 계속
+    두드리는 동안에는 제한이 풀리지 않는다.
     """
     global _throttle_until
     with _throttle_lock:
@@ -163,11 +167,19 @@ def _await_throttle() -> None:
         time.sleep(min(remaining, 5))
 
 
-def fetch_html(params: dict[str, str], *, retries: int = 7) -> str:
+# 속도 제한은 몇 초 기다린다고 풀리지 않아 길게 물러난다. 반면 응답이 멎는 것은
+# 기다린다고 나아지지 않으므로 짧게 몇 번만 확인하고 그 칸을 포기한다.
+THROTTLE_CODES = (403, 429, 503)
+THROTTLE_RETRIES = 5
+
+
+def fetch_html(params: dict[str, str], *, attempts: int = 3) -> str:
     query = urllib.parse.urlencode(params)
     url = f"{BASE_URL}?{query}"
     last_error: Exception | None = None
-    for attempt in range(retries):
+    attempt = 0
+    throttled = 0
+    while attempt < attempts:
         _await_throttle()
         request = urllib.request.Request(url, headers=HEADERS)
         try:
@@ -179,26 +191,32 @@ def fetch_html(params: dict[str, str], *, retries: int = 7) -> str:
         except urllib.error.HTTPError as error:
             last_error = error
             detail = _describe_http_error(error)
-            # 4xx 중 차단·속도 제한이 아닌 것은 기다려도 그대로다. 요청 자체가 틀렸다.
-            if 400 <= error.code < 500 and error.code not in (403, 408, 429):
+            if error.code in THROTTLE_CODES:
+                # 차단은 이 칸이 깨진 것과 무관하니 아래 시도 횟수를 깎지 않는다.
+                if throttled >= THROTTLE_RETRIES:
+                    raise RuntimeError(f"차단이 풀리지 않는다: {url} — {detail}")
+                retry_after = error.headers.get("Retry-After")
+                backoff = (
+                    int(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else min(15 * 2**throttled, 120)
+                )
+                throttled += 1
+                log(f"  차단 {throttled}/{THROTTLE_RETRIES} ({detail})")
+                _pause_all(backoff, f"HTTP {error.code}")
+                continue
+            if 400 <= error.code < 500:
                 raise RuntimeError(f"요청 실패: {url} — {detail}") from error
-            retry_after = error.headers.get("Retry-After")
-            backoff = (
-                int(retry_after)
-                if retry_after and retry_after.isdigit()
-                else _backoff_seconds(attempt)
-            )
-            log(f"  재시도 {attempt + 1}/{retries} ({detail})")
-            _pause_all(backoff, f"HTTP {error.code}")
+            backoff = 2**attempt  # 5xx 는 이 조합만의 문제일 때가 많다
         except (urllib.error.URLError, TimeoutError, OSError) as error:
-            # 응답이 오다 멎는 것(read timeout)도 사실상 속도 제한이다. 서버는 500 을
-            # 주다가 아예 침묵하는 쪽으로 넘어간다. 잠깐 쉬는 정도로는 회복되지 않아
-            # 5xx 와 똑같이 길게 기다린다.
             last_error = error
-            backoff = _backoff_seconds(attempt)
-            log(f"  재시도 {attempt + 1}/{retries} ({error})")
-            _pause_all(backoff, str(error))
-    raise RuntimeError(f"요청 실패: {url}") from last_error
+            backoff = 2**attempt
+            detail = str(error)
+        attempt += 1
+        if attempt < attempts:
+            log(f"  재시도 {attempt}/{attempts} ({detail}) — {backoff}초 후")
+            time.sleep(backoff)
+    raise Unavailable(f"{url} — {last_error}") from last_error
 
 
 def parse_rows(page: str) -> list[dict]:
@@ -335,6 +353,7 @@ def build_shard(
     tier: str, region: str, maps: list[dict], rq: str, *, delay: float
 ) -> dict:
     per_map: dict[str, dict[str, list[float | None]]] = {}
+    missing: list[str] = []
     # 'all-maps' 는 맵 편차를 재는 기준선으로 함께 받아둔다.
     for slug in ["all-maps"] + [game_map["slug"] for game_map in maps]:
         params = {
@@ -344,12 +363,21 @@ def build_shard(
             "rq": rq,
             "tier": tier,
         }
-        page = fetch_html(params)
+        try:
+            page = fetch_html(params)
+        except Unavailable as error:
+            # 이 칸 하나 때문에 나머지 800여 건을 버릴 이유가 없다. 화면은 빠진 맵을
+            # '데이터 없음'으로 그린다.
+            missing.append(slug)
+            log(f"  비움: {tier}/{region}/{slug} — {error}")
+            continue
         per_map[slug] = extract_stats(page)
         if delay:
             time.sleep(delay)
-    log(f"완료: {tier} / {region} ({len(per_map)}개 맵)")
+    note = f", 빈 칸 {len(missing)}개" if missing else ""
+    log(f"완료: {tier} / {region} ({len(per_map)}개 맵{note})")
     return {
+        "missing": missing,
         "input": INPUT,
         "rq": rq,
         "tier": tier,
@@ -424,6 +452,8 @@ def main() -> int:
 
     started = time.monotonic()
     total_bytes = 0
+    requested = len(combos) * (len(maps) + 1)
+    missing: list[str] = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
             pool.submit(build_shard, t, r, maps, rq, delay=args.delay): (t, r)
@@ -431,7 +461,20 @@ def main() -> int:
         }
         for future, (t, r) in futures.items():
             shard = future.result()
+            missing += [f"{t}/{r}/{slug}" for slug in shard["missing"]]
             total_bytes += write_json(DATA_DIR / shard_name(t, r), shard)
+
+    # 빈 칸 몇 개는 사이트 사정이라 넘어가지만, 이만큼 비면 수집기나 사이트가 크게
+    # 어긋난 것이다. 반쪽짜리 통계를 배포하느니 멈춘다.
+    allowed = max(1, requested // 20)  # 5%
+    if len(missing) > allowed:
+        raise SystemExit(
+            f"빈 칸이 {len(missing)}개입니다(요청 {requested}건 중 허용 {allowed}개). "
+            f"예: {', '.join(sorted(missing)[:5])}"
+        )
+    if missing:
+        by_slug = Counter(cell.rsplit("/", 1)[1] for cell in missing)
+        log(f"사이트가 못 준 칸 {len(missing)}개 — {dict(by_slug)}")
 
     write_json(
         DATA_DIR / "meta.json",

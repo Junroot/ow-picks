@@ -56,11 +56,15 @@ jobs:
               problems.append(f'영웅이 {heroes}명뿐입니다. 페이지 구조가 바뀐 것 같습니다')
           if maps < 20:
               problems.append(f'맵이 {maps}개뿐입니다. 페이지 구조가 바뀐 것 같습니다')
-          # 모든 샤드가 meta 의 맵을 전부 담고 있는지 (기준선 all-maps 포함)
+          # 사이트가 특정 (맵, 티어, 지역) 조합을 못 내려주는 일이 있어 빈 칸은 허용한다.
+          # 다만 한 샤드가 크게 비면 그 티어·지역은 통계로 쓸 수 없으니 배포하지 않는다.
+          empty = 0
           for path in shards:
               shard = json.loads(path.read_text(encoding='utf-8'))
-              if len(shard['maps']) != maps + 1:
+              empty += len(shard.get('missing', []))
+              if len(shard['maps']) < (maps + 1) * 0.9:
                   problems.append(f'{path.name}: 맵 {len(shard["maps"])}개 (기대 {maps + 1})')
+          print(f'사이트가 못 준 칸 {empty}개')
           if problems:
               sys.exit('배포하지 않습니다 — ' + '; '.join(problems[:5]))
           PY
