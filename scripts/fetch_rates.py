@@ -62,11 +62,11 @@ _OPENER = urllib.request.build_opener(
     urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
 )
 
-# 경쟁전 - 역할 고정. 빠른 대전(rq=0)은 밴이 없어 유효 픽률 = 원본 픽률이라 수집하지 않는다.
-# 값은 사이트 사정으로 바뀔 수 있다(경쟁전은 1 -> 2 -> 1 로 바뀐 적이 있다). 없는 값을
-# 주면 서버는 오류 대신 빠른 대전으로 조용히 폴백하므로, 아래 extract_maps 에서 맵 목록의
-# data-rqs 와 대조해 어긋나면 즉시 멈춘다.
-RQ = "1"
+# 경쟁전 - 역할 고정만 수집한다. 빠른 대전은 밴이 없어 유효 픽률 = 원본 픽률이다.
+# 경쟁전의 rq 번호는 사이트 사정으로 계속 바뀐다(1 -> 2 -> 1 -> 2 로 바뀐 이력이 있고,
+# 그때마다 수집이 깨졌다). 없는 번호를 주면 서버는 오류 대신 빠른 대전으로 조용히
+# 폴백하므로 상수로 박아두면 안 된다. 매 실행마다 rq 선택 상자에서 이름으로 찾아낸다.
+COMPETITIVE_LABELS = ("경쟁전", "역할 고정")
 
 # 마우스·키보드만. 컨트롤러(Console)는 요청·데이터가 두 배로 늘어나는데 메타가 크게
 # 달라 함께 보기도 어려워 수집하지 않는다.
@@ -95,6 +95,11 @@ _OPTION_RQS_RE = re.compile(r'data-rqs="([^"]*)"')
 _SELECT_RE = re.compile(
     r'<select[^>]*data-label="(tier|region)".*?</select>', re.S | re.I
 )
+_RQ_SELECT_RE = re.compile(
+    r'<select[^>]*data-label="rq".*?</select>', re.S | re.I
+)
+# rq 항목의 이름은 data-title 속성과 태그 사이 텍스트에 같은 값이 들어 있다.
+_RQ_OPTION_RE = re.compile(r"<option(?P<attrs>[^>]*)>(?P<label>[^<]*)", re.S)
 
 _print_lock = threading.Lock()
 
@@ -203,7 +208,39 @@ def extract_heroes(page: str) -> dict[str, dict]:
     return heroes
 
 
-def extract_maps(page: str) -> list[dict]:
+def detect_rq(page: str) -> str:
+    """rq 선택 상자에서 '경쟁전 - 역할 고정'의 값을 찾는다.
+
+    번호가 아니라 이름으로 찾으므로 사이트가 번호를 바꿔도 따라간다. 이름이 바뀌거나
+    항목이 사라지면 엉뚱한 모드를 수집하느니 멈추는 편이 낫다.
+    """
+    select = _RQ_SELECT_RE.search(page)
+    if select is None:
+        raise ValueError("rq 선택 상자를 찾지 못했습니다. 페이지 구조가 바뀐 것 같습니다.")
+
+    options: list[tuple[str, str]] = []
+    for option in _RQ_OPTION_RE.finditer(select.group(0)):
+        value_match = _VALUE_RE.search(option.group("attrs"))
+        if value_match is None:
+            continue
+        options.append(
+            (value_match.group(1), html.unescape(option.group("label")).strip())
+        )
+
+    matched = [
+        value
+        for value, label in options
+        if all(keyword in label for keyword in COMPETITIVE_LABELS)
+    ]
+    if len(matched) != 1:
+        raise ValueError(
+            f"'{' '.join(COMPETITIVE_LABELS)}' 항목을 하나로 특정하지 못했습니다"
+            f"(후보 {matched}). 페이지의 rq 항목은 {options} 입니다."
+        )
+    return matched[0]
+
+
+def extract_maps(page: str, rq: str) -> list[dict]:
     """맵 목록을 게임 모드(optgroup label)와 함께, 사이트에 나오는 순서대로 뽑는다.
 
     새 맵이나 새 게임 모드가 추가되면 그대로 따라온다. 어느 그룹에도 속하지 않은
@@ -228,8 +265,8 @@ def extract_maps(page: str) -> list[dict]:
         if slug_match is None or slug_match.group(1) == "all-maps":
             continue
         rqs_match = _OPTION_RQS_RE.search(attrs)
-        available_in = rqs_match.group(1).split(",") if rqs_match else [RQ]
-        if RQ not in available_in:
+        available_in = rqs_match.group(1).split(",") if rqs_match else [rq]
+        if rq not in available_in:
             continue  # 경쟁전에 없는 맵은 건너뛴다
         name = html.unescape(token.group("label")).strip()
         maps.append(
@@ -242,8 +279,8 @@ def extract_maps(page: str) -> list[dict]:
     if not maps:
         seen = sorted({m.group(1) for m in _OPTION_RQS_RE.finditer(select.group(0))})
         raise ValueError(
-            f"경쟁전(rq={RQ})에 해당하는 맵이 없습니다. 페이지의 data-rqs 값은 "
-            f"{seen} 입니다. RQ 상수를 확인하세요."
+            f"경쟁전(rq={rq})에 해당하는 맵이 없습니다. 페이지의 data-rqs 값은 "
+            f"{seen} 입니다."
         )
     return maps
 
@@ -260,7 +297,9 @@ def shard_name(tier: str, region: str) -> str:
     return f"{INPUT}_{tier}_{region}.json"
 
 
-def build_shard(tier: str, region: str, maps: list[dict], *, delay: float) -> dict:
+def build_shard(
+    tier: str, region: str, maps: list[dict], rq: str, *, delay: float
+) -> dict:
     per_map: dict[str, dict[str, list[float | None]]] = {}
     # 'all-maps' 는 맵 편차를 재는 기준선으로 함께 받아둔다.
     for slug in ["all-maps"] + [game_map["slug"] for game_map in maps]:
@@ -268,7 +307,7 @@ def build_shard(tier: str, region: str, maps: list[dict], *, delay: float) -> di
             "input": INPUT,
             "map": slug,
             "region": region,
-            "rq": RQ,
+            "rq": rq,
             "tier": tier,
         }
         page = fetch_html(params)
@@ -278,7 +317,7 @@ def build_shard(tier: str, region: str, maps: list[dict], *, delay: float) -> di
     log(f"완료: {tier} / {region} ({len(per_map)}개 맵)")
     return {
         "input": INPUT,
-        "rq": RQ,
+        "rq": rq,
         "tier": tier,
         "region": region,
         "fetchedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -317,17 +356,21 @@ def main() -> int:
     args = parser.parse_args()
 
     log("메타데이터 수집 중...")
-    seed = fetch_html(
-        {
-            "input": INPUT,
-            "map": "all-maps",
-            "region": "Asia",
-            "rq": RQ,
-            "tier": "All",
-        }
-    )
+    # 경쟁전 번호를 아직 모르니 rq 없이 한 번 받아(서버는 빠른 대전을 내려준다) 선택
+    # 상자에서 번호를 알아낸 뒤, 같은 페이지를 경쟁전으로 다시 받아 메타를 뽑는다.
+    # 영웅 목록이 모드마다 다를 수 있어 메타는 경쟁전 페이지 기준으로 맞춘다.
+    probe_params = {
+        "input": INPUT,
+        "map": "all-maps",
+        "region": "Asia",
+        "tier": "All",
+    }
+    rq = detect_rq(fetch_html(probe_params))
+    log(f"경쟁전 - 역할 고정 = rq {rq}")
+
+    seed = fetch_html({**probe_params, "rq": rq})
     heroes = extract_heroes(seed)
-    maps = extract_maps(seed)
+    maps = extract_maps(seed, rq)
     filters = extract_filter_options(seed)
 
     tiers = args.tiers.split(",") if args.tiers else filters.get("tier", ["All"])
@@ -349,7 +392,7 @@ def main() -> int:
     total_bytes = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(build_shard, t, r, maps, delay=args.delay): (t, r)
+            pool.submit(build_shard, t, r, maps, rq, delay=args.delay): (t, r)
             for t, r in combos
         }
         for future, (t, r) in futures.items():
@@ -361,7 +404,7 @@ def main() -> int:
         {
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "source": BASE_URL,
-            "rq": RQ,
+            "rq": rq,
             "input": INPUT,
             "heroes": heroes,
             "maps": maps,
