@@ -153,9 +153,9 @@ h1 { margin: 0; font-size: clamp(20px, 3.4vw, 28px); letter-spacing: -.01em; }
   margin-bottom: 5px;
   color: var(--muted); /* 아래 목록에 없는 역할이 새로 생겨도 읽히도록 */
 }
-.role-TANK { color: var(--tank); }
-.role-DAMAGE { color: var(--damage); }
-.role-SUPPORT { color: var(--support); }
+.role-tank { color: var(--tank); }
+.role-damage { color: var(--damage); }
+.role-support { color: var(--support); }
 
 .hero-row {
   display: flex;

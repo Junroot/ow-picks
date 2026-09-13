@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""오버워치 공식 영웅 통계(rates) 수집기.
+"""오버워치 한국 서버 영웅 통계(rates) 수집기.
 
-overwatch.blizzard.com/ko-kr/rates/ 페이지는 서버 렌더링이라 페이지 HTML 안에
-<blz-data-table allrows="[...]"> 속성으로 영웅 전체의 승률/픽률/밴률 JSON이 들어 있다.
-별도 API나 인증, 브라우저가 필요 없다.
+overwatch.nexon.com/hero/rate 는 Nuxt 서버 렌더링 페이지라, HTML 안
+<script id="__NUXT_DATA__"> 에 영웅 전체의 승률/픽률/밴률과 필터 목록이
+JSON 으로 들어 있다. 별도 API 키나 인증, 브라우저가 필요 없다.
 
-역할(role) 필터는 클라이언트 사이드라 서버 응답에 영향을 주지 않는다. 따라서
-(input, rq, tier, map, region) 조합 하나당 1회 요청으로 전 역할 데이터를 얻는다.
+넥슨 페이지를 쓰는 이유는 **지역에 '한국'이 있어서**다. 블리자드 공식 페이지는
+아시아/아메리카/유럽만 제공해 한국 서버 메타를 따로 볼 수 없다.
+
+주의: 이 사이트는 없는 필터 값을 주면 오류 대신 **기본값으로 조용히 폴백**한다
+(rank=zzz -> 모든 등급, map=zzz -> 모든 전장, rq=9 -> 빠른 대전). 그래서 값을
+상수로 박지 않고 매번 페이지의 필터 목록에서 읽어 쓰고, 응답이 돌려주는 rq 가
+요청한 값과 같은지 매번 확인한다.
+
+역할(role) 필터는 표시용이라 role=all 한 번으로 전 역할 데이터가 온다. 따라서
+(map, rank, region) 조합 하나당 1회 요청이다.
 
 출력:
   site/data/meta.json                  영웅/맵/필터 메타데이터
-  site/data/PC_{tier}_{region}.json    맵 31개 × 영웅 전체의 원본 수치
+  site/data/pc_{rank}_{region}.json    맵 31개 × 영웅 전체의 원본 수치
 
 유효 픽률은 저장하지 않는다. 원본 수치만 저장하고 화면에서 계산한다.
 """
@@ -19,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import html
 import http.cookiejar
 import json
 import re
@@ -34,10 +41,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-BASE_URL = "https://overwatch.blizzard.com/ko-kr/rates/"
+BASE_URL = "https://overwatch.nexon.com/hero/rate"
 
-# 도구 이름을 밝힌 User-Agent 로는 GitHub Actions 러너에서 403 이 떨어졌다(집 회선에서는
-# 같은 요청이 통과한다). 브라우저가 보내는 것과 같은 헤더 묶음으로 맞춘다.
+# 도구 이름을 밝힌 User-Agent 로는 GitHub Actions 러너에서 403 이 떨어진 전례가 있다
+# (집 회선에서는 같은 요청이 통과한다). 브라우저가 보내는 것과 같은 헤더 묶음으로 맞춘다.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -57,50 +64,37 @@ HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-# 첫 응답이 내려주는 locale/session 쿠키를 이후 요청에 그대로 실어 보낸다. 사람이 필터를
+# 첫 응답이 내려주는 세션 쿠키를 이후 요청에 그대로 실어 보낸다. 사람이 필터를
 # 바꿔가며 보는 흐름과 같아진다. CookieJar 는 내부 잠금이 있어 여러 워커가 함께 써도 된다.
 _OPENER = urllib.request.build_opener(
     urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
 )
 
-# 경쟁전 - 역할 고정만 수집한다. 빠른 대전은 밴이 없어 유효 픽률 = 원본 픽률이다.
-# 경쟁전의 rq 번호는 사이트 사정으로 계속 바뀐다(1 -> 2 -> 1 -> 2 로 바뀐 이력이 있고,
-# 그때마다 수집이 깨졌다). 없는 번호를 주면 서버는 오류 대신 빠른 대전으로 조용히
-# 폴백하므로 상수로 박아두면 안 된다. 매 실행마다 rq 선택 상자에서 이름으로 찾아낸다.
+# 경쟁전 - 역할 고정만 수집한다. 빠른 대전은 밴이 없어(밴률이 전부 0) 유효 픽률이
+# 원본 픽률과 같다. rq 번호는 사이트 사정으로 바뀔 수 있고, 없는 번호를 주면 서버가
+# 조용히 빠른 대전으로 떨어뜨리므로 상수로 두지 않고 매번 이름으로 찾는다.
 COMPETITIVE_LABELS = ("경쟁전", "역할 고정")
 
-# 마우스·키보드만. 컨트롤러(Console)는 요청·데이터가 두 배로 늘어나는데 메타가 크게
-# 달라 함께 보기도 어려워 수집하지 않는다.
-INPUT = "PC"
+# 마우스·키보드만. 콘솔은 요청·데이터가 두 배로 늘어나는데 메타가 크게 달라
+# 함께 보기도 어려워 수집하지 않는다.
+INPUT = "pc"
+
+# 이 도구가 존재하는 이유. 아시아/아메리카/유럽도 같은 코드로 받을 수 있지만
+# (--regions), 기본은 한국만이다.
+DEFAULT_REGIONS = ["korea"]
+
+# 맵 편차를 재는 기준선. 필터 목록에서 이 값만 따로 쓴다.
+BASELINE_MAP = "all"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "site" / "data"
 
-# 속성 값 안의 JSON 큰따옴표는 &quot; 로 이스케이프돼 있어서 [^"]* 로 안전하게 끊긴다.
-_ALLROWS_RE = re.compile(r'allrows="([^"]*)"')
-_MAP_SELECT_RE = re.compile(
-    r'<select[^>]*data-label="map".*?</select>', re.S | re.I
-)
-# 선택 상자를 순서대로 훑는다. optgroup 시작/끝과 option 을 한 번에 잡아서,
-# 새 모드(optgroup)가 생기거나 그룹 밖에 놓인 맵이 추가돼도 놓치지 않는다.
-# option 의 이름은 </option> 유무와 무관하게 다음 태그 전까지로 읽는다.
-_MAP_TOKEN_RE = re.compile(
-    r'<optgroup[^>]*label="(?P<mode>[^"]*)"'
-    r"|(?P<groupend></optgroup>)"
-    r"|<option(?P<attrs>[^>]*)>(?P<label>[^<]*)",
-    re.S,
-)
-_OPTION_RE = re.compile(r'<option[^>]*value="([^"]*)"', re.S)
-_VALUE_RE = re.compile(r'value="([^"]*)"')
-_OPTION_RQS_RE = re.compile(r'data-rqs="([^"]*)"')
-_SELECT_RE = re.compile(
-    r'<select[^>]*data-label="(tier|region)".*?</select>', re.S | re.I
-)
-_RQ_SELECT_RE = re.compile(
-    r'<select[^>]*data-label="rq".*?</select>', re.S | re.I
-)
-# rq 항목의 이름은 data-title 속성과 태그 사이 텍스트에 같은 값이 들어 있다.
-_RQ_OPTION_RE = re.compile(r"<option(?P<attrs>[^>]*)>(?P<label>[^<]*)", re.S)
+_NUXT_RE = re.compile(r'id="__NUXT_DATA__"[^>]*>(.*?)</script>', re.S)
+
+# 필터 목록을 담은 객체와 영웅 한 줄을 담은 객체는 이 키들로 알아본다.
+# payload 안의 위치는 사이트가 바뀌면 달라지므로 키로 찾는다.
+_FILTER_KEYS = frozenset({"maps", "ranks", "regions", "rulesetQueues", "inputs"})
+_HERO_KEYS = frozenset({"heroId", "pickRate", "banRate", "winRate"})
 
 _print_lock = threading.Lock()
 
@@ -137,8 +131,8 @@ def _describe_http_error(error: urllib.error.HTTPError) -> str:
 class Unavailable(RuntimeError):
     """사이트가 이 조합을 끝내 내려주지 못했다.
 
-    특정 (맵, 티어, 지역) 조합에서 서버가 응답을 시작만 하고 끝맺지 못하는 일이
-    있다. 몇 번을 다시 물어도 똑같고 브라우저로 열어도 마찬가지라, 블리자드 쪽
+    특정 (맵, 등급, 지역) 조합에서 서버가 응답을 시작만 하고 끝맺지 못하는 일이
+    있다. 몇 번을 다시 물어도 똑같고 브라우저로 열어도 마찬가지라, 사이트 쪽
     데이터 문제로 보인다. 다른 조합은 멀쩡하니 이 칸만 비우고 넘어간다.
     """
 
@@ -219,168 +213,205 @@ def fetch_html(params: dict[str, str], *, attempts: int = 3) -> str:
     raise Unavailable(f"{url} — {last_error}") from last_error
 
 
-def parse_rows(page: str) -> list[dict]:
-    """<blz-data-table allrows="..."> 에서 영웅 행 목록을 뽑는다."""
-    match = _ALLROWS_RE.search(page)
+# ---------- Nuxt payload 읽기 ----------
+#
+# devalue 형식이다. 최상위는 평평한 배열이고, 배열/객체의 원소는 값이 아니라 이 배열의
+# 색인이다. 같은 값을 여러 번 쓰지 않으려고 이렇게 접는다. 음수 색인은 undefined·NaN
+# 같은 특수값을 뜻하므로 None 으로 본다.
+
+_MAX_DEPTH = 32
+
+
+def parse_payload(page: str) -> list:
+    match = _NUXT_RE.search(page)
     if match is None:
-        raise ValueError("allrows 속성을 찾지 못했습니다. 페이지 구조가 바뀐 것 같습니다.")
-    return json.loads(html.unescape(match.group(1)))
+        raise ValueError(
+            "__NUXT_DATA__ 를 찾지 못했습니다. 페이지 구조가 바뀐 것 같습니다."
+        )
+    return json.loads(match.group(1))
+
+
+def hydrate(flat: list, index: int, depth: int = 0) -> object:
+    if index < 0:
+        return None
+    if depth > _MAX_DEPTH:
+        raise ValueError("payload 가 너무 깊습니다. 형식이 바뀐 것 같습니다.")
+    value = flat[index]
+    if isinstance(value, list):
+        return [hydrate(flat, i, depth + 1) for i in value]
+    if isinstance(value, dict):
+        return {k: hydrate(flat, i, depth + 1) for k, i in value.items()}
+    return value
+
+
+def _find(flat: list, keys: frozenset) -> int:
+    for index, value in enumerate(flat):
+        if isinstance(value, dict) and keys <= value.keys():
+            return index
+    raise ValueError(
+        f"payload 에서 {sorted(keys)} 를 가진 객체를 찾지 못했습니다. "
+        "페이지 구조가 바뀐 것 같습니다."
+    )
 
 
 def _number(value: object) -> float | None:
-    """'--'(데이터 부족)와 null을 None으로 정규화한다."""
+    """데이터가 부족한 칸은 None 으로 정규화한다."""
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         return float(value)
     return None
 
 
-def extract_stats(page: str) -> dict[str, list[float | None]]:
+def effective_rq(flat: list) -> str | None:
+    """응답이 실제로 어느 게임 모드로 계산됐는지.
+
+    요청한 rq 와 다르면 서버가 조용히 폴백한 것이다. 빠른 대전으로 떨어지면 밴률이
+    전부 0 으로 와서, 알아채지 못하면 데이터 전체가 조용히 망가진다.
+    """
+    for value in flat:
+        if isinstance(value, dict) and "rq" in value and "status" in value:
+            result = hydrate(flat, value["rq"])
+            return None if result is None else str(result)
+    return None
+
+
+def extract_stats(page: str, expected_rq: str) -> dict[str, list[float | None]]:
     """영웅 id -> [픽률, 밴률, 승률]"""
+    flat = parse_payload(page)
+    actual = effective_rq(flat)
+    if actual is not None and actual != expected_rq:
+        raise ValueError(
+            f"요청한 게임 모드(rq={expected_rq})가 아니라 rq={actual} 로 응답했습니다. "
+            "사이트가 기본값으로 폴백한 것 같습니다."
+        )
+
     stats: dict[str, list[float | None]] = {}
-    for row in parse_rows(page):
-        cells = row["cells"]
-        stats[row["id"]] = [
-            _number(cells.get("pickrate")),
-            _number(cells.get("banrate")),
-            _number(cells.get("winrate")),
-        ]
+    for index, value in enumerate(flat):
+        if isinstance(value, dict) and _HERO_KEYS <= value.keys():
+            row = hydrate(flat, index)
+            stats[row["heroId"]] = [
+                _number(row.get("pickRate")),
+                _number(row.get("banRate")),
+                _number(row.get("winRate")),
+            ]
+    if not stats:
+        raise ValueError("영웅 행을 하나도 찾지 못했습니다. 페이지 구조가 바뀐 것 같습니다.")
     return stats
 
 
 def extract_heroes(page: str) -> dict[str, dict]:
+    flat = parse_payload(page)
     heroes: dict[str, dict] = {}
-    for row in parse_rows(page):
-        hero = row["hero"]
-        heroes[row["id"]] = {
-            "name": hero.get("name") or row["cells"].get("name"),
-            "role": hero.get("role"),
-            "subrole": hero.get("subrole"),
-            "portrait": hero.get("portrait"),
-        }
+    for index, value in enumerate(flat):
+        if isinstance(value, dict) and _HERO_KEYS <= value.keys():
+            row = hydrate(flat, index)
+            heroes[row["heroId"]] = {
+                "name": row.get("name") or row["heroId"],
+                "role": row.get("role"),
+                "subrole": row.get("subrole"),
+                "portrait": row.get("thumbnailUrl"),
+            }
     return heroes
 
 
-def detect_rq(page: str) -> str:
-    """rq 선택 상자에서 '경쟁전 - 역할 고정'의 값을 찾는다.
+def extract_filters(page: str) -> dict[str, list[dict]]:
+    """역할·입력·게임모드·등급·지역·맵 선택 목록. 새 값이 생기면 그대로 따라온다."""
+    flat = parse_payload(page)
+    return hydrate(flat, _find(flat, _FILTER_KEYS))
+
+
+def detect_rq(filters: dict[str, list[dict]]) -> str:
+    """게임 모드 목록에서 '경쟁전 - 역할 고정'의 값을 찾는다.
 
     번호가 아니라 이름으로 찾으므로 사이트가 번호를 바꿔도 따라간다. 이름이 바뀌거나
     항목이 사라지면 엉뚱한 모드를 수집하느니 멈추는 편이 낫다.
     """
-    select = _RQ_SELECT_RE.search(page)
-    if select is None:
-        raise ValueError("rq 선택 상자를 찾지 못했습니다. 페이지 구조가 바뀐 것 같습니다.")
-
-    options: list[tuple[str, str]] = []
-    for option in _RQ_OPTION_RE.finditer(select.group(0)):
-        value_match = _VALUE_RE.search(option.group("attrs"))
-        if value_match is None:
-            continue
-        options.append(
-            (value_match.group(1), html.unescape(option.group("label")).strip())
-        )
-
+    queues = [(q["value"], q.get("name") or "") for q in filters["rulesetQueues"]]
     matched = [
         value
-        for value, label in options
-        if all(keyword in label for keyword in COMPETITIVE_LABELS)
+        for value, name in queues
+        if all(keyword in name for keyword in COMPETITIVE_LABELS)
     ]
     if len(matched) != 1:
         raise ValueError(
             f"'{' '.join(COMPETITIVE_LABELS)}' 항목을 하나로 특정하지 못했습니다"
-            f"(후보 {matched}). 페이지의 rq 항목은 {options} 입니다."
+            f"(후보 {matched}). 페이지의 게임 모드 목록은 {queues} 입니다."
         )
-    return matched[0]
+    return str(matched[0])
 
 
-def extract_maps(page: str, rq: str) -> list[dict]:
-    """맵 목록을 게임 모드(optgroup label)와 함께, 사이트에 나오는 순서대로 뽑는다.
+def extract_maps(filters: dict[str, list[dict]]) -> list[dict]:
+    """맵 목록을 게임 모드와 함께, 사이트에 나오는 순서대로 뽑는다.
 
-    새 맵이나 새 게임 모드가 추가되면 그대로 따라온다. 어느 그룹에도 속하지 않은
-    맵은 '기타'로 묶는다. 기준선인 all-maps 와 경쟁전에 없는 맵은 제외한다.
+    맵 목록은 평평하지만 parentValue 로 계층을 이룬다. 다른 항목이 부모로 가리키는
+    항목(쟁탈·호위 등)은 모드 머리글이고, 그 아래가 실제 맵이다. 새 맵이나 새 모드가
+    추가되면 그대로 따라온다. 어느 모드에도 속하지 않은 맵은 '기타'로 묶는다.
     """
-    select = _MAP_SELECT_RE.search(page)
-    if select is None:
-        raise ValueError("맵 선택 상자를 찾지 못했습니다.")
+    entries = filters["maps"]
+    names = {entry["value"]: entry.get("name") or entry["value"] for entry in entries}
+    parents = {entry.get("parentValue") for entry in entries}
 
     maps: list[dict] = []
-    mode = None
-    for token in _MAP_TOKEN_RE.finditer(select.group(0)):
-        if token.group("mode") is not None:
-            mode = html.unescape(token.group("mode")).strip()
-            continue
-        if token.group("groupend") is not None:
-            mode = None
-            continue
-
-        attrs = token.group("attrs")
-        slug_match = _VALUE_RE.search(attrs)
-        if slug_match is None or slug_match.group(1) == "all-maps":
-            continue
-        rqs_match = _OPTION_RQS_RE.search(attrs)
-        available_in = rqs_match.group(1).split(",") if rqs_match else [rq]
-        if rq not in available_in:
-            continue  # 경쟁전에 없는 맵은 건너뛴다
-        name = html.unescape(token.group("label")).strip()
+    for entry in entries:
+        slug = entry["value"]
+        if slug == BASELINE_MAP or slug in parents:
+            continue  # 기준선과 모드 머리글은 맵이 아니다
         maps.append(
             {
-                "slug": slug_match.group(1),
-                "name": name or slug_match.group(1),
-                "mode": mode or "기타",
+                "slug": slug,
+                "name": names[slug],
+                "mode": names.get(entry.get("parentValue"), "기타"),
             }
         )
     if not maps:
-        seen = sorted({m.group(1) for m in _OPTION_RQS_RE.finditer(select.group(0))})
         raise ValueError(
-            f"경쟁전(rq={rq})에 해당하는 맵이 없습니다. 페이지의 data-rqs 값은 "
-            f"{seen} 입니다."
+            f"맵을 하나도 찾지 못했습니다. 페이지의 맵 목록은 {entries} 입니다."
         )
     return maps
 
 
-def extract_filter_options(page: str) -> dict[str, list[str]]:
-    """티어·지역 선택 상자의 값 목록. 새 티어나 지역이 생기면 그대로 따라온다."""
-    options: dict[str, list[str]] = {}
-    for select in _SELECT_RE.finditer(page):
-        options[select.group(1)] = _OPTION_RE.findall(select.group(0))
-    return options
+def option_values(filters: dict[str, list[dict]], key: str) -> list[str]:
+    return [str(entry["value"]) for entry in filters[key]]
 
 
-def shard_name(tier: str, region: str) -> str:
-    return f"{INPUT}_{tier}_{region}.json"
+def shard_name(rank: str, region: str) -> str:
+    return f"{INPUT}_{rank}_{region}.json"
 
 
 def build_shard(
-    tier: str, region: str, maps: list[dict], rq: str, *, delay: float
+    rank: str, region: str, maps: list[dict], rq: str, *, delay: float
 ) -> dict:
     per_map: dict[str, dict[str, list[float | None]]] = {}
     missing: list[str] = []
-    # 'all-maps' 는 맵 편차를 재는 기준선으로 함께 받아둔다.
-    for slug in ["all-maps"] + [game_map["slug"] for game_map in maps]:
+    # 기준선('모든 전장')을 함께 받아 맵 편차를 잰다.
+    for slug in [BASELINE_MAP] + [game_map["slug"] for game_map in maps]:
         params = {
-            "input": INPUT,
-            "map": slug,
-            "region": region,
+            "role": "all",
             "rq": rq,
-            "tier": tier,
+            "rank": rank,
+            "map": slug,
+            "input": INPUT,
+            "region": region,
         }
         try:
             page = fetch_html(params)
         except Unavailable as error:
-            # 이 칸 하나 때문에 나머지 800여 건을 버릴 이유가 없다. 화면은 빠진 맵을
+            # 이 칸 하나 때문에 나머지 수백 건을 버릴 이유가 없다. 화면은 빠진 맵을
             # '데이터 없음'으로 그린다.
             missing.append(slug)
-            log(f"  비움: {tier}/{region}/{slug} — {error}")
+            log(f"  비움: {rank}/{region}/{slug} — {error}")
             continue
-        per_map[slug] = extract_stats(page)
+        per_map[slug] = extract_stats(page, rq)
         if delay:
             time.sleep(delay)
     note = f", 빈 칸 {len(missing)}개" if missing else ""
-    log(f"완료: {tier} / {region} ({len(per_map)}개 맵{note})")
+    log(f"완료: {rank} / {region} ({len(per_map)}개 맵{note})")
     return {
         "missing": missing,
         "input": INPUT,
         "rq": rq,
-        "tier": tier,
+        "tier": rank,
         "region": region,
         "fetchedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "columns": ["pickrate", "banrate", "winrate"],
@@ -395,8 +426,26 @@ def write_json(path: Path, payload: object) -> int:
     return len(text.encode("utf-8"))
 
 
+def _choose(requested: str | None, available: list[str], label: str) -> list[str]:
+    """--tiers/--regions 로 받은 값을 사이트가 실제로 가진 값으로 제한한다.
+
+    사이트는 모르는 값을 주면 오류 대신 기본값으로 조용히 폴백한다. 오타 하나로
+    전부 '모든 등급' 데이터를 아홉 번 받아 적는 일이 없도록 여기서 막는다.
+    """
+    if requested is None:
+        return available
+    wanted = [value.strip() for value in requested.split(",") if value.strip()]
+    unknown = [value for value in wanted if value not in available]
+    if unknown:
+        raise SystemExit(
+            f"사이트에 없는 {label} 값입니다: {', '.join(unknown)} "
+            f"(가능한 값: {', '.join(available)})"
+        )
+    return wanted
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="오버워치 영웅 통계 수집기")
+    parser = argparse.ArgumentParser(description="오버워치 한국 서버 영웅 통계 수집기")
     parser.add_argument(
         "--workers", type=int, default=4, help="동시 요청 수 (기본 4)"
     )
@@ -407,9 +456,12 @@ def main() -> int:
         help="같은 워커 안에서 요청 사이 대기 시간(초, 기본 0.3)",
     )
     parser.add_argument(
-        "--tiers", help="쉼표로 구분한 티어 목록 (기본: 사이트의 전체 티어)"
+        "--tiers", help="쉼표로 구분한 등급 목록 (기본: 사이트의 전체 등급)"
     )
-    parser.add_argument("--regions", help="쉼표로 구분한 지역 목록")
+    parser.add_argument(
+        "--regions",
+        help=f"쉼표로 구분한 지역 목록 (기본: {','.join(DEFAULT_REGIONS)})",
+    )
     parser.add_argument(
         "--limit-maps",
         type=int,
@@ -418,33 +470,41 @@ def main() -> int:
     args = parser.parse_args()
 
     log("메타데이터 수집 중...")
-    # 경쟁전 번호를 아직 모르니 rq 없이 한 번 받아(서버는 빠른 대전을 내려준다) 선택
-    # 상자에서 번호를 알아낸 뒤, 같은 페이지를 경쟁전으로 다시 받아 메타를 뽑는다.
+    # 경쟁전 번호를 아직 모르니 rq 없이 한 번 받아(서버는 빠른 대전을 내려준다) 필터
+    # 목록에서 번호를 알아낸 뒤, 같은 페이지를 경쟁전으로 다시 받아 메타를 뽑는다.
     # 영웅 목록이 모드마다 다를 수 있어 메타는 경쟁전 페이지 기준으로 맞춘다.
     probe_params = {
+        "role": "all",
+        "rank": "all",
+        "map": BASELINE_MAP,
         "input": INPUT,
-        "map": "all-maps",
-        "region": "Asia",
-        "tier": "All",
+        "region": DEFAULT_REGIONS[0],
     }
-    rq = detect_rq(fetch_html(probe_params))
+    rq = detect_rq(extract_filters(fetch_html(probe_params)))
     log(f"경쟁전 - 역할 고정 = rq {rq}")
 
     seed = fetch_html({**probe_params, "rq": rq})
+    filters = extract_filters(seed)
     heroes = extract_heroes(seed)
-    maps = extract_maps(seed, rq)
-    filters = extract_filter_options(seed)
+    maps = extract_maps(filters)
 
-    tiers = args.tiers.split(",") if args.tiers else filters.get("tier", ["All"])
-    regions = (
-        args.regions.split(",")
-        if args.regions
-        else filters.get("region", ["Americas", "Asia", "Europe"])
-    )
+    ranks = _choose(args.tiers, option_values(filters, "ranks"), "등급")
+    available_regions = option_values(filters, "regions")
+    if args.regions:
+        regions = _choose(args.regions, available_regions, "지역")
+    else:
+        # 기본값도 사이트 목록에 있는지 확인한다. 없는 값을 그냥 보내면 다른 지역
+        # 데이터를 한국이라고 적어 넣게 된다.
+        regions = [r for r in DEFAULT_REGIONS if r in available_regions]
+        if not regions:
+            raise SystemExit(
+                f"기본 지역 {DEFAULT_REGIONS} 가 사이트 목록에 없습니다 "
+                f"(사이트: {', '.join(available_regions)})."
+            )
     if args.limit_maps:
         maps = maps[: args.limit_maps]
 
-    combos = [(t, r) for t in tiers for r in regions]
+    combos = [(t, r) for t in ranks for r in regions]
     log(
         f"영웅 {len(heroes)}명 / 맵 {len(maps)}개(+기준선) / 샤드 {len(combos)}개 "
         f"= 요청 {len(combos) * (len(maps) + 1)}건"
@@ -483,9 +543,10 @@ def main() -> int:
             "source": BASE_URL,
             "rq": rq,
             "input": INPUT,
+            "baselineMap": BASELINE_MAP,
             "heroes": heroes,
             "maps": maps,
-            "tiers": tiers,
+            "tiers": ranks,
             "regions": regions,
         },
     )

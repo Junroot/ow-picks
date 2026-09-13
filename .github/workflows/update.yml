@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 요청 837건 (티어 9 × 지역 3 × (맵 30 + 기준선)). 잘 풀리면 6~13분.
+      # 요청 279건 (등급 9 × 지역 1(한국) × (맵 30 + 기준선)). 잘 풀리면 3~5분.
       # 러너에서 403 을 맞은 적이 있어 동시 요청과 간격을 넉넉하게 잡았다. 하루 1회
       # 도는 작업이라 몇 분 더 걸리는 편이 차단당하는 것보다 낫다. 사이트가 지치면
       # 수집기가 전체 워커를 최대 2분씩 세우므로 그만큼 더 걸릴 수 있다.
@@ -59,12 +59,23 @@ jobs:
           # 사이트가 특정 (맵, 티어, 지역) 조합을 못 내려주는 일이 있어 빈 칸은 허용한다.
           # 다만 한 샤드가 크게 비면 그 티어·지역은 통계로 쓸 수 없으니 배포하지 않는다.
           empty = 0
+          banned = 0
           for path in shards:
               shard = json.loads(path.read_text(encoding='utf-8'))
               empty += len(shard.get('missing', []))
               if len(shard['maps']) < (maps + 1) * 0.9:
                   problems.append(f'{path.name}: 맵 {len(shard["maps"])}개 (기대 {maps + 1})')
-          print(f'사이트가 못 준 칸 {empty}개')
+              banned += sum(
+                  1
+                  for rows in shard['maps'].values()
+                  for pick, ban, win in rows.values()
+                  if ban
+              )
+          print(f'사이트가 못 준 칸 {empty}개, 밴률이 0이 아닌 칸 {banned}개')
+          # 밴이 하나도 없다면 경쟁전이 아니라 빠른 대전을 받아온 것이다. 그 데이터로는
+          # 유효 픽률이 원본 픽률과 같아져서, 이 사이트가 존재할 이유가 없어진다.
+          if not banned:
+              problems.append('밴률이 전부 0입니다. 빠른 대전 데이터를 받아온 것 같습니다')
           if problems:
               sys.exit('배포하지 않습니다 — ' + '; '.join(problems[:5]))
           PY

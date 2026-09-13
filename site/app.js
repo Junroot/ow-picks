@@ -6,16 +6,20 @@
  */
 
 // 표시 순서 힌트. 여기에 없는 역할이 새로 생기면 뒤에 붙는다 (숨기지 않는다).
-const ROLE_ORDER_HINT = ['TANK', 'DAMAGE', 'SUPPORT'];
-const ROLE_LABEL = { TANK: '돌격', DAMAGE: '공격', SUPPORT: '지원' };
+const ROLE_ORDER_HINT = ['tank', 'damage', 'support'];
+const ROLE_LABEL = { tank: '돌격', damage: '공격', support: '지원' };
 const roleLabel = (role) => ROLE_LABEL[role] || role || '기타';
 const TIER_LABEL = {
-  All: '모든 등급', Bronze: '브론즈', Silver: '실버', Gold: '골드',
-  Platinum: '플래티넘', Diamond: '다이아몬드', Master: '마스터',
-  Grandmaster: '그랜드마스터 및 챔피언',
+  all: '모든 등급', bronze: '브론즈', silver: '실버', gold: '골드',
+  platinum: '플래티넘', emerald: '에메랄드', diamond: '다이아몬드',
+  master: '마스터', grandmaster: '그랜드마스터 및 챔피언',
 };
-const REGION_LABEL = { Americas: '아메리카', Asia: '아시아', Europe: '유럽' };
-const BASELINE = 'all-maps';
+const REGION_LABEL = {
+  korea: '한국', asia: '아시아', americas: '아메리카', europe: '유럽',
+};
+// 맵 편차의 기준선인 '모든 전장'의 슬러그. 수집기가 meta.baselineMap 으로 알려주며,
+// meta 를 읽기 전에도 state 기본값이 필요해서 같은 값을 여기에 둔다.
+let BASELINE = 'all';
 const BAN_WARN = 60;      // 이 밴률을 넘으면 보정 배율이 2.5배를 넘어 수치가 불안정하다
 const DENOM_FLOOR = 0.05; // 밴률 95% 이상에서 분모가 0으로 붕괴하는 것을 막는다
 
@@ -28,8 +32,8 @@ let mapSlugs = [];
 
 const state = {
   view: 'maps',
-  tier: 'All',
-  region: 'Asia',
+  tier: 'all',
+  region: 'korea',
   map: BASELINE,
   map2: BASELINE,
   role: 'ALL',
@@ -79,7 +83,7 @@ function ranked(mapStats, role) {
 // 수집기는 마우스·키보드(PC)만 받으므로 입력장치는 샤드 이름의 고정 접두사다.
 function shardUrl(tier, region) {
   const version = meta && meta.generatedAt ? `?v=${encodeURIComponent(meta.generatedAt)}` : '';
-  return `data/${meta.input || 'PC'}_${tier}_${region}.json${version}`;
+  return `data/${meta.input || 'pc'}_${tier}_${region}.json${version}`;
 }
 
 function loadShard(tier, region) {
@@ -384,6 +388,7 @@ async function init() {
   }
 
   // 선택 상자는 전부 meta 에서 만든다. 영웅·맵·모드·티어가 늘어나면 그대로 따라온다.
+  if (meta.baselineMap) BASELINE = meta.baselineMap;
   roles = detectRoles();
   mapSlugs = [BASELINE, ...meta.maps.map((m) => m.slug)];
   const mapLabel = (slug) =>
