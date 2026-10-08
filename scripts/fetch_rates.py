@@ -137,6 +137,14 @@ class Unavailable(RuntimeError):
     """
 
 
+class NoData(Unavailable):
+    """페이지는 정상인데 영웅 목록이 비어 있다.
+
+    시즌이 바뀌어 맵 로테이션에서 빠진 맵(예: 할리우드)은 필터 목록에는 남아 있고
+    통계만 빈 목록으로 온다. 응답이 끊긴 경우와 똑같이 그 칸만 비운다.
+    """
+
+
 def _pause_all(seconds: float, reason: str) -> None:
     """모든 워커를 함께 멈춰 세운다.
 
@@ -296,7 +304,8 @@ def extract_stats(page: str, expected_rq: str) -> dict[str, list[float | None]]:
                 _number(row.get("winRate")),
             ]
     if not stats:
-        raise ValueError("영웅 행을 하나도 찾지 못했습니다. 페이지 구조가 바뀐 것 같습니다.")
+        # 필터 목록까지 읽혔다면 구조는 그대로고, 사이트가 이 조합의 통계를 비워 둔 것이다.
+        raise NoData("영웅 목록이 비어 있습니다.")
     return stats
 
 
@@ -396,13 +405,13 @@ def build_shard(
         }
         try:
             page = fetch_html(params)
+            per_map[slug] = extract_stats(page, rq)
         except Unavailable as error:
             # 이 칸 하나 때문에 나머지 수백 건을 버릴 이유가 없다. 화면은 빠진 맵을
             # '데이터 없음'으로 그린다.
             missing.append(slug)
             log(f"  비움: {rank}/{region}/{slug} — {error}")
             continue
-        per_map[slug] = extract_stats(page, rq)
         if delay:
             time.sleep(delay)
     note = f", 빈 칸 {len(missing)}개" if missing else ""
@@ -487,6 +496,10 @@ def main() -> int:
     filters = extract_filters(seed)
     heroes = extract_heroes(seed)
     maps = extract_maps(filters)
+    if not heroes:
+        # 맵 하나가 비는 것과 달리 '모든 전장'까지 비면 받을 것이 없다. 시즌 교체 직후
+        # 사이트가 통계를 잠시 비워 두는 동안 이렇게 된 적이 있다.
+        raise SystemExit("경쟁전 영웅 목록이 비어 있습니다. 사이트가 통계를 갱신 중인 것 같습니다.")
 
     ranks = _choose(args.tiers, option_values(filters, "ranks"), "등급")
     available_regions = option_values(filters, "regions")
