@@ -29,6 +29,7 @@ import argparse
 import gzip
 import http.cookiejar
 import json
+import os
 import re
 import sys
 import threading
@@ -108,6 +109,18 @@ def log(*args: object) -> None:
         print(*args, file=sys.stderr, flush=True)
 
 
+def warn(message: str) -> None:
+    """Actions 화면의 요약에도 남는 경고. 로컬에서는 평범한 로그로 찍힌다.
+
+    워크플로 명령(::warning::)은 표준 출력으로 내보내야 러너가 알아본다.
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        with _print_lock:
+            print(f"::warning::{message}", flush=True)
+    else:
+        log(f"경고: {message}")
+
+
 def _describe_http_error(error: urllib.error.HTTPError) -> str:
     """차단당했을 때 원인을 로그만 보고 알 수 있도록 응답을 요약한다.
 
@@ -175,9 +188,15 @@ THROTTLE_CODES = (403, 429, 503)
 THROTTLE_RETRIES = 5
 
 
-def fetch_html(params: dict[str, str], *, attempts: int = 3) -> str:
-    query = urllib.parse.urlencode(params)
-    url = f"{BASE_URL}?{query}"
+def fetch_html(
+    params: dict[str, str] | None = None,
+    *,
+    base_url: str = BASE_URL,
+    attempts: int = 3,
+) -> str:
+    """페이지 HTML 을 받는다. 같은 사이트의 패치노트 페이지(scripts/patch_notes.py)도
+    이 함수로 받으므로 주소를 base_url 로 바꿀 수 있다."""
+    url = f"{base_url}?{urllib.parse.urlencode(params)}" if params else base_url
     last_error: Exception | None = None
     attempt = 0
     throttled = 0

@@ -1,0 +1,51 @@
+{
+  "title": "메타 해설",
+  "description": "등급별 메타 해설. 문장마다 근거로 쓴 사실 행 ID({tier}.{hero})나 변경 ID({newsNo}.{hero})를 cites 에 단다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["overview", "tiers"],
+  "properties": {
+    "overview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "cites"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "cites": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "tiers": {
+      "description": "키는 사실 표의 등급 슬러그(all, bronze, …, grandmaster).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["headline", "notes"],
+        "properties": {
+          "headline": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "cites"],
+            "properties": {
+              "text": {"type": "string", "minLength": 1},
+              "cites": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["hero", "text", "cites"],
+              "properties": {
+                "hero": {"type": "string", "description": "영웅 슬러그"},
+                "text": {"type": "string", "minLength": 1},
+                "cites": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

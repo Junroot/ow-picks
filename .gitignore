@@ -5,5 +5,8 @@ __pycache__/
 # 수집기 산출물 — Actions 가 매번 새로 만든다.
 site/data/
 
+# data 브랜치(패치 구간 기록)를 받아 두는 자리. main 에는 커밋하지 않는다.
+history/
+
 # 셸 따옴표 실수로 생긴 폴더
 ~/

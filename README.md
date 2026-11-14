@@ -22,6 +22,7 @@
 | 맵별 상위 영웅 | 게임 모드별로 묶인 맵 30개, 각 맵의 돌격/공격/지원 상위 N명. `모든 전장` 평균 대비 차이(▲▼)를 함께 표시 |
 | 전체 순위 | 특정 전장의 전체 영웅을 유효 픽률·픽률·밴률·승률로 정렬 |
 | 티어별 추이 | 영웅 하나의 유효 픽률을 브론즈~그랜드마스터로 비교 |
+| 메타 분석 | 직전 패치 구간과 현재 구간의 등급별 수치 변화, 그 사이 패치노트의 영웅 변경, 자동 해설 |
 
 필터 상태는 URL에 들어가므로 링크를 그대로 공유할 수 있다.
 
@@ -29,9 +30,17 @@
 
 ```
 scripts/fetch_rates.py   수집기 (파이썬 표준 라이브러리만 사용, 의존성 없음)
+scripts/history.py       등급별 '모든 전장' 수치를 날짜별 스냅샷으로 기록
+scripts/patch_notes.py   넥슨 패치노트 수집·영웅별 변경 파싱
+scripts/meta_facts.py    직전 구간 대 현재 구간 사실 표 → site/data/analysis.json
+scripts/commentary_prompt.py   해설 생성 여부 판단(순위 서명)과 프롬프트
+scripts/verify_commentary.py   해설 문장의 숫자·근거를 사실 표와 대조
+scripts/commentary.schema.json claude -p 출력 스키마
 site/                    정적 사이트 — 빌드 단계 없음
 site/data/meta.json      영웅·맵·필터 메타데이터
 site/data/pc_{등급}_{지역}.json
+site/data/analysis.json  메타 분석 탭 데이터
+tests/                   unittest
 .github/workflows/update.yml   하루 1회 수집 후 GitHub Pages 배포
 ```
 
@@ -108,13 +117,50 @@ python3 -m http.server 4173 --directory site
 전체 수집은 옵션 없이 `python3 scripts/fetch_rates.py`. 확인용으로 `--limit-maps 3` 을 쓰면 빠르다.
 한국 말고 다른 지역이 궁금하면 `--regions korea,asia` 처럼 덧붙인다.
 
+테스트는 표준 라이브러리 `unittest` 로 돈다. 설치할 것이 없다.
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+`tests/fixtures/` 에는 넥슨 패치노트 페이지에서 `__NUXT_DATA__` 만 남긴 샘플이 들어 있다.
+
 ## GitHub Pages 배포
 
 1. 이 폴더를 GitHub 저장소로 올린다.
 2. 저장소 **Settings → Pages → Build and deployment → Source** 를 **GitHub Actions** 로 바꾼다.
 3. **Actions → 통계 갱신 및 배포 → Run workflow** 로 첫 배포를 돌린다. 이후 매일 05:00(KST) 자동 갱신된다.
 
-데이터는 저장소에 커밋하지 않고 Actions 산출물로만 배포한다 (저장소가 매일 커지지 않도록).
+통계 데이터는 main 에 커밋하지 않고 Actions 산출물로만 배포한다 (저장소가 매일 커지지 않도록).
+메타 분석용 기록만 main 과 이력을 공유하지 않는 `data` 브랜치에 쌓인다 (아래 참고).
+
+### 메타 분석 설정
+
+메타 분석 탭은 따로 설정하지 않아도 사실 표(수치 변화·패치 변경)까지는 나온다.
+자동 해설까지 보려면 저장소 소유자가 Claude 구독 토큰을 secret 으로 등록한다.
+
+1. 로컬에서 `claude setup-token` 으로 토큰을 발급한다 (Claude Code CLI 필요).
+2. 저장소 **Settings → Secrets and variables → Actions → New repository secret** 에
+   이름 `CLAUDE_CODE_OAUTH_TOKEN` 으로 넣는다.
+3. 해설 모델은 워크플로의 `CLAUDE_MODEL` 로 정한다.
+
+해설은 영웅 순위나 구간 사이 패치 목록이 바뀐 날에만 만들므로 대개 패치당 한두 번 호출하며,
+소유자의 구독 사용 한도에서 차감된다. secret 이 없거나 토큰이 만료되면 해설만 빠지고
+배포는 그대로 된다 (Actions 로그에 경고가 남는다).
+
+워크플로는 `data` 브랜치에 푸시하므로 권한이 `contents: write` 다. 브랜치가 없으면 첫 실행에서
+고아 브랜치로 만든다. 구성은 다음과 같다.
+
+```
+data 브랜치
+├── snapshots/{YYYY-MM-DD}.json   등급별 '모든 전장' 수치 (수치가 바뀐 날만, 한국 날짜)
+├── patches/{newsNo}.json         파싱한 패치노트 (한 번 받은 글은 다시 받지 않는다)
+└── analysis/latest.json          마지막 사실 표 + 해설 + 순위 서명
+```
+
+넥슨 통계는 패치가 적용될 때만 갱신되므로, 수치가 직전 스냅샷과 같은 날은 저장하지 않는다.
+스냅샷 하나가 한 패치 구간의 시작이고, 가장 최근 스냅샷과 그 앞 스냅샷을 비교한다.
+한 등급이라도 `모든 전장` 칸이 비면 그날은 스냅샷을 건너뛴다 (수집 실패가 가짜 구간을 만들지 않도록).
 
 ## 수치를 읽을 때 주의할 점
 
@@ -126,6 +172,19 @@ python3 -m http.server 4173 --directory site
 - 공식 통계는 표본 수를 공개하지 않는다. 낮은 등급의 특정 맵처럼 표본이 적은 조합은
   그냥 노이즈일 수 있다.
 - 모든 통계는 패치 시작 시점 스냅샷이다.
+
+### 메타 분석 탭
+
+- 비교 단위는 날짜가 아니라 **패치 구간**이다. 기록은 이 기능을 배포한 날부터 쌓이므로,
+  첫 구간에는 현재 수치와 최근 패치만 나오고 다음 패치 이후부터 비교가 시작된다.
+- 구간 사이 패치는 `직전 구간 시작일 < 게시일 ≤ 현재 구간 시작일` 인 패치노트다.
+  넥슨이 공개하는 수치가 새 패치 이후의 플레이인지 직전 구간의 플레이인지 아직 확인하지 못해서,
+  **패치가 수치 변화의 원인이라고 단정하지 않는다.** 시간 순서가 겹친다는 사실만 보여준다.
+- 새 패치노트의 게시일은 `1일 전` 같은 상대 표기를 수집 시각 기준으로 환산한 값이라 하루 정도 어긋날 수 있다.
+- 해설은 Claude 가 사실 표를 읽고 자동으로 쓴다 (`자동 생성` 표시). 문장 속 숫자와 인용은
+  사실 표와 대조해 맞지 않는 문장을 버리지만, 버프를 너프로 읽는 식의 해석 오류는 잡지 못한다.
+  원문 변경 줄을 항상 함께 보여주니 직접 확인한다.
+- 수치는 소수점 첫째 자리로 반올림해 저장하고, 변화량은 원본 차이를 반올림한 값이다.
 
 블리자드·넥슨과 무관한 비공식 도구다. 원본 데이터의 출처는
 [오버워치 공식 영웅 통계(넥슨)](https://overwatch.nexon.com/hero/rate)다.

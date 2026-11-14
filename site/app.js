@@ -46,6 +46,8 @@ const state = {
 /* ---------- 계산 ---------- */
 
 // [픽률, 밴률, 승률] -> 유효 픽률
+// 메타 분석 사실 표는 scripts/meta_facts.py 의 effective() 로 같은 값을 미리 계산한다.
+// 식이나 DENOM_FLOOR 를 바꾸면 그쪽도 함께 바꾼다.
 function effective(stats) {
   if (!stats || stats[0] == null) return null;
   const ban = stats[1] == null ? 0 : stats[1];
@@ -298,6 +300,188 @@ async function renderTiers() {
   main.innerHTML = html;
 }
 
+/* ---------- 뷰: 메타 분석 ---------- */
+// data/analysis.json 은 scripts/meta_facts.py 가 만든다. 직전 패치 구간과 현재 구간의
+// 등급별 수치(소수점 첫째 자리로 반올림됨), 구간 사이 패치의 영웅별 변경, 자동 해설을 담는다.
+
+const MOVERS_LIMIT = 8; // 패치 변경 없이 크게 움직인 영웅을 몇 명까지 보여줄지
+
+let analysisPromise = null;
+
+// 실패해도 다른 탭에는 영향이 없도록, 이 탭을 열 때 처음 한 번만 받는다.
+function loadAnalysis() {
+  if (!analysisPromise) {
+    const version = meta && meta.generatedAt ? `?v=${encodeURIComponent(meta.generatedAt)}` : '';
+    analysisPromise = fetch(`data/analysis.json${version}`, { cache: 'no-cache' }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    });
+  }
+  return analysisPromise;
+}
+
+// '2026-11-07' -> '11월 7일'
+function dayLabel(iso) {
+  const [, month, day] = String(iso).split('-');
+  return month && day ? `${Number(month)}월 ${Number(day)}일` : String(iso);
+}
+
+const autoTag = `<span class="auto-tag" title="사실 표를 읽고 Claude 가 자동으로 쓴 문장입니다. 숫자는 사실 표와 대조했지만 해석은 틀릴 수 있습니다.">자동 생성</span>`;
+
+function commentaryLine(sentence, cls) {
+  if (!sentence || !sentence.text) return '';
+  return `<p class="${cls}">${autoTag} ${escapeHtml(sentence.text)}</p>`;
+}
+
+// 직전 구간 대비 변화(%p). 밴률은 오르내림이 좋고 나쁨을 뜻하지 않아 색을 빼고 보여준다.
+function changeTag(delta, neutral = false) {
+  if (delta == null) return '';
+  if (Math.abs(delta) < 0.05) return `<span class="delta flat">±0</span>`;
+  const cls = neutral ? 'flat' : delta > 0 ? 'up' : 'down';
+  const arrow = delta > 0 ? '▲' : '▼';
+  return `<span class="delta ${cls}" title="직전 구간 대비">${arrow}${Math.abs(delta).toFixed(1)}</span>`;
+}
+
+function analysisStats(row) {
+  const raw = [row.now.pick, row.now.ban, row.now.win];
+  const delta = row.delta || {};
+  const cell = (label, key, extra = '', neutral = false) => `<span class="an-stat">
+      <span class="an-stat-label">${label}</span>
+      <b>${pct(row.now[key])}</b>${extra} ${changeTag(delta[key], neutral)}</span>`;
+  return `<span class="an-stats">
+    ${cell('유효 픽률', 'epr', warnFlag(raw))}${cell('픽률', 'pick')}${cell('밴률', 'ban', '', true)}${cell('승률', 'win')}
+  </span>`;
+}
+
+function heroHead(row) {
+  const hero = meta.heroes[row.hero] || { name: row.hero };
+  return `<span class="an-hero-name">${portrait(hero)}<span>${escapeHtml(hero.name)}</span>
+    <span class="role-tag">${escapeHtml(roleLabel(hero.role))}</span></span>${analysisStats(row)}`;
+}
+
+function heroCard(row, analysis, notes) {
+  const noteHtml = notes.map((note) => commentaryLine(note, 'an-note')).join('');
+  if (!row.changes.length) {
+    return `<div class="an-hero"><div class="an-hero-head">${heroHead(row)}</div>${noteHtml}</div>`;
+  }
+  const patchOf = (newsNo) => analysis.patches.find((p) => p.newsNo === newsNo) || {};
+  const changes = row.changes
+    .map((id) => analysis.changes[id])
+    .filter(Boolean)
+    .map((change) => {
+      const patch = patchOf(change.newsNo);
+      const title = patch.title ? `${escapeHtml(patch.title)}` : `패치 ${escapeHtml(change.newsNo)}`;
+      const lines = change.lines.map((line) => `<li>${escapeHtml(line)}</li>`).join('');
+      const dev = change.dev ? `<p class="an-dev"><b>개발자의 의견</b> ${escapeHtml(change.dev)}</p>` : '';
+      return `<div class="an-change"><div class="an-change-title">${title}</div>${lines ? `<ul>${lines}</ul>` : ''}${dev}</div>`;
+    })
+    .join('');
+  return `<div class="an-hero">
+    <details>
+      <summary class="an-hero-head">${heroHead(row)}<span class="an-toggle">변경 내용</span></summary>
+      <div class="an-changes">${changes}</div>
+    </details>
+    ${noteHtml}
+  </div>`;
+}
+
+function byRole(rows) {
+  return roles
+    .map((role) => ({
+      role,
+      rows: rows
+        .filter((row) => (meta.heroes[row.hero] || {}).role === role)
+        .sort((a, b) => b.now.epr - a.now.epr),
+    }))
+    .filter((group) => group.rows.length);
+}
+
+async function renderAnalysis() {
+  let analysis;
+  try {
+    analysis = await loadAnalysis();
+  } catch (error) {
+    main.innerHTML = `<p class="notice">분석 데이터 없음 — 아직 기록이 없거나 오늘 분석 단계가 실패했습니다.
+      다른 탭은 그대로 쓸 수 있습니다. <span class="fine">(${escapeHtml(error.message)})</span></p>`;
+    return;
+  }
+  const rows = (analysis.tiers || {})[state.tier];
+  const tierName = TIER_LABEL[state.tier] || state.tier;
+  if (!rows || !rows.length) {
+    main.innerHTML = `<p class="notice">${escapeHtml(tierName)} 분석 데이터가 없습니다.</p>`;
+    return;
+  }
+  const first = !analysis.previous;
+
+  // 1. 구간과 패치
+  const period = first
+    ? `<b>${dayLabel(analysis.current.since)} 구간</b>`
+    : `<b>${dayLabel(analysis.previous.since)} 구간</b> → <b>${dayLabel(analysis.current.since)} 구간</b>`;
+  const patches = [...analysis.patches].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const patchLinks = patches.length
+    ? patches
+        .map((p) => {
+          const title = escapeHtml(p.title || `패치 ${p.newsNo}`);
+          const link = /^https:\/\//.test(p.url || '')
+            ? `<a href="${escapeHtml(p.url)}" target="_blank" rel="noopener">${title}</a>`
+            : title;
+          return `<li>${link} <span class="fine">${dayLabel(p.date)}</span></li>`;
+        })
+        .join('')
+    : `<li class="fine">${first ? '최근 패치노트를 찾지 못했습니다.' : '구간 사이에 나온 패치노트가 없습니다.'}</li>`;
+
+  let html = `<section class="an-period">
+    <p>${period} · ${escapeHtml(tierName)} · 한국</p>
+    <p class="an-label">${first ? '최근 패치' : '구간 사이 패치'}</p>
+    <ul class="an-patches">${patchLinks}</ul>
+    ${first ? `<p class="notice">직전 구간 기록이 없어 현재 수치와 최근 패치만 보여줍니다. 다음 패치 이후 비교가 시작됩니다.</p>` : ''}
+  </section>`;
+
+  // 2. 해설
+  const commentary = analysis.commentary;
+  const tierCommentary = commentary && commentary.tiers ? commentary.tiers[state.tier] : null;
+  const notesOf = (hero) =>
+    tierCommentary && tierCommentary.notes ? tierCommentary.notes.filter((note) => note.hero === hero) : [];
+  if (commentary && (commentary.overview || tierCommentary)) {
+    html += `<section class="an-commentary">
+      ${commentaryLine(commentary.overview, 'an-overview')}
+      ${tierCommentary ? commentaryLine(tierCommentary.headline, 'an-headline') : ''}
+      ${tierCommentary ? '' : `<p class="fine">${escapeHtml(tierName)} 자동 해설은 없습니다.</p>`}
+    </section>`;
+  } else {
+    html += `<p class="notice">자동 해설이 없습니다. 아래 사실만 보여줍니다.</p>`;
+  }
+
+  html += first
+    ? `<p class="legend">굵은 숫자는 현재 구간 값입니다. 행을 누르면 패치 변경 내용이 나옵니다.</p>`
+    : `<p class="legend">굵은 숫자는 현재 구간 값이고, ▲▼는 직전 구간 대비 변화(%p)입니다.
+    구간 사이 패치와 수치 변화는 시간 순서가 겹칠 뿐, 패치가 원인이라고 확인된 것은 아닙니다.</p>`;
+
+  // 3. 구간 사이 패치에서 바뀐 영웅
+  const changed = rows.filter((row) => row.changes.length);
+  html += `<h2 class="mode-title">${first ? '최근 패치에서 바뀐 영웅' : '구간 사이 패치에서 바뀐 영웅'}</h2>`;
+  if (!changed.length) html += `<p class="fine">바뀐 영웅이 없습니다.</p>`;
+  for (const group of byRole(changed)) {
+    html += `<div class="an-role"><div class="role-name role-${escapeHtml(group.role)}">${escapeHtml(roleLabel(group.role))}</div>
+      ${group.rows.map((row) => heroCard(row, analysis, notesOf(row.hero))).join('')}</div>`;
+  }
+
+  // 4. 변경 없이 크게 움직인 영웅 (+ 해설이 붙은 나머지 영웅)
+  if (!first) {
+    const score = (row) => (row.delta ? Math.max(Math.abs(row.delta.win), Math.abs(row.delta.epr)) : 0);
+    const unchanged = rows.filter((row) => !row.changes.length && row.delta);
+    const top = [...unchanged].sort((a, b) => score(b) - score(a)).filter((row) => score(row) > 0).slice(0, MOVERS_LIMIT);
+    const movers = unchanged.filter((row) => top.includes(row) || notesOf(row.hero).length);
+    movers.sort((a, b) => score(b) - score(a));
+    html += `<h2 class="mode-title">변경 없이 크게 움직인 영웅</h2>`;
+    html += movers.length
+      ? movers.map((row) => heroCard(row, analysis, notesOf(row.hero))).join('')
+      : `<p class="fine">눈에 띄게 움직인 영웅이 없습니다.</p>`;
+  }
+
+  main.innerHTML = html;
+}
+
 /* ---------- 컨트롤 ---------- */
 
 function fillSelect(select, values, labeler) {
@@ -322,6 +506,8 @@ function syncControls() {
     tab.classList.toggle('active', tab.dataset.view === state.view);
   });
   el('f-tier').closest('label').hidden = state.view === 'tiers';
+  // 분석은 한국만 한다.
+  el('f-region').closest('label').hidden = state.view === 'analysis';
 }
 
 function pushUrl() {
@@ -346,7 +532,7 @@ function validateState() {
   const fallback = (key, allowed, first) => {
     if (!allowed.includes(state[key])) state[key] = first;
   };
-  fallback('view', ['maps', 'ranking', 'tiers'], 'maps');
+  fallback('view', ['maps', 'ranking', 'tiers', 'analysis'], 'maps');
   fallback('tier', meta.tiers, meta.tiers[0]);
   fallback('region', meta.regions, meta.regions[0]);
   fallback('map', mapSlugs, BASELINE);
@@ -364,6 +550,10 @@ async function render() {
   try {
     if (state.view === 'tiers') {
       await renderTiers();
+      return;
+    }
+    if (state.view === 'analysis') {
+      await renderAnalysis();
       return;
     }
     const shard = await loadShard(state.tier, state.region);
