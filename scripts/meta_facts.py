@@ -46,14 +46,15 @@ def _values(stats: list) -> dict[str, float]:
     return {"pick": pick, "ban": ban, "win": win, "epr": effective(stats)}
 
 
-def hero_row(tier: str, hero: str, role: str | None, now: list, prev: list | None) -> dict:
+def hero_row(tier: str, hero: str, info: dict, now: list, prev: list | None) -> dict:
     """사실 표의 행 하나. 변화량은 반올림한 값끼리가 아니라 원본 차이를 반올림한다."""
     now_raw = _values(now)
     prev_raw = _values(prev) if prev else None
     return {
         "id": f"{tier}.{hero}",
         "hero": hero,
-        "role": role,
+        "role": info.get("role"),
+        "subrole": info.get("subrole"),
         "now": {key: _round(now_raw[key]) for key in FIELDS},
         "prev": {key: _round(prev_raw[key]) for key in FIELDS} if prev_raw else None,
         "delta": {key: _round(now_raw[key] - prev_raw[key]) for key in FIELDS} if prev_raw else None,
@@ -106,7 +107,7 @@ def build_facts(
         prev_rows = previous["tiers"].get(tier, {}) if previous else {}
         tier_rows = []
         for hero, now in rows.items():
-            row = hero_row(tier, hero, (heroes.get(hero) or {}).get("role"), now, prev_rows.get(hero))
+            row = hero_row(tier, hero, heroes.get(hero) or {}, now, prev_rows.get(hero))
             row["changes"] = list(changed_by_hero.get(hero, []))
             tier_rows.append(row)
         tiers[tier] = tier_rows

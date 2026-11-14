@@ -161,6 +161,20 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual((report["total"], report["dropped"]), (5, 2))
         self.assertIsNotNone(commentary)
 
+    def test_analysis_sentences(self) -> None:
+        data = output()
+        data["tiers"]["grandmaster"]["analysis"] = [
+            sentence("정커퀸이 승률 51.8%로 돌격 축을 잡은 것으로 보인다."),
+            sentence("돌격 한 명 구도에서 9.9%p 차이가 난다."),
+        ]
+        commentary, report = self.verify(data)
+        self.assertEqual(report["dropped"], 1)
+        self.assertEqual([a["text"] for a in commentary["tiers"]["grandmaster"]["analysis"]], ["정커퀸이 승률 51.8%로 돌격 축을 잡은 것으로 보인다."])
+
+    def test_missing_analysis_is_empty_list(self) -> None:
+        commentary, _ = self.verify(output())
+        self.assertEqual(commentary["tiers"]["grandmaster"]["analysis"], [])
+
     def test_unknown_tier_dropped(self) -> None:
         data = output()
         data["tiers"]["champion"] = {"headline": sentence("정커퀸 승률이 51.8%다."), "notes": []}
@@ -213,6 +227,11 @@ class SignatureTest(unittest.TestCase):
         facts["patches"] = []
         self.assertNotEqual(commentary_prompt.signature(FACTS), commentary_prompt.signature(facts))
 
+    def test_prompt_change(self) -> None:
+        before = commentary_prompt.signature(FACTS)
+        with mock.patch.object(commentary_prompt, "INSTRUCTIONS", commentary_prompt.INSTRUCTIONS + "추가 지시\n"):
+            self.assertNotEqual(before, commentary_prompt.signature(FACTS))
+
     def test_decide(self) -> None:
         sig = commentary_prompt.signature(FACTS)
         reuse = {"signature": sig, "commentary": output()}
@@ -229,7 +248,11 @@ class PromptTest(unittest.TestCase):
         self.assertIn("grandmaster.junker-queen", prompt)
         self.assertIn("### 862.junker-queen", prompt)
         self.assertIn("도륙: 재사용 대기시간이 9초에서 7초로 감소했습니다.", prompt)
-        self.assertIn("인과 표현", prompt)
+        self.assertIn("~로 보인다", prompt)  # 해석은 추정 표현으로 허용한다
+        self.assertIn("subrole", prompt)
+        # 검증기가 허용하지 않는 숫자를 프롬프트가 가르치면 그 숫자를 쓴 문장이 모두 버려진다.
+        for number in ("60", "100", "200"):
+            self.assertNotIn(number, commentary_prompt.INSTRUCTIONS)
         self.assertNotIn("직전 구간이 없다", prompt)
 
     def test_first_period_note(self) -> None:

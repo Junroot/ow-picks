@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import meta_facts  # noqa: E402
 
 HEROES = {
-    "junker-queen": {"name": "정커퀸", "role": "tank"},
+    "junker-queen": {"name": "정커퀸", "role": "tank", "subrole": "stalwart"},
     "mauga": {"name": "마우가", "role": "tank"},
     "ana": {"name": "아나", "role": "support"},
     "newbie": {"name": "신규", "role": "damage"},
@@ -55,6 +55,7 @@ class FactsTest(unittest.TestCase):
         row = row_of(facts, "junker-queen")
         self.assertEqual(row["id"], "grandmaster.junker-queen")
         self.assertEqual(row["role"], "tank")
+        self.assertEqual(row["subrole"], "stalwart")
         self.assertEqual(row["delta"]["win"], 3.5)
         self.assertEqual(row["delta"]["pick"], 2.1)
 

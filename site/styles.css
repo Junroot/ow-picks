@@ -291,7 +291,7 @@ td.hero-cell img { width: 26px; height: 26px; border-radius: 5px; flex: none; }
 .an-period .notice { margin: 10px 0 0; }
 
 .an-commentary { margin: 14px 0 0; }
-.an-overview, .an-headline { margin: 0 0 8px; }
+.an-overview, .an-headline, .an-analysis { margin: 0 0 8px; }
 .an-headline { font-weight: 600; }
 
 .auto-tag {

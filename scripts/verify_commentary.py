@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """해설 문장을 사실 표와 대조해, 사실 표에 없는 숫자나 근거를 쓴 문장을 버린다.
 
-문장(overview, 등급별 headline, notes[])마다 확인한다.
+문장(overview, 등급별 headline·analysis[]·notes[])마다 확인한다.
   1. cites 가 하나 이상이고, 모두 사실 표의 행 ID({tier}.{hero})나 변경 ID({newsNo}.{hero})다.
   2. notes 의 hero 가 meta.json 에 있는 슬러그다.
   3. 문장 속 숫자가 모두 허용 집합 안에 있다. 허용 집합은
@@ -107,12 +107,17 @@ def verify(output: dict, facts: dict, heroes: dict[str, dict]) -> tuple[dict | N
     for tier, block in tiers.items():
         block = block if isinstance(block, dict) else {}
         notes = block.get("notes") if isinstance(block.get("notes"), list) else []
+        analysis = block.get("analysis") if isinstance(block.get("analysis"), list) else []
         if tier not in facts["tiers"]:
-            total += 1 + len(notes)
-            dropped += 1 + len(notes)
-            reasons.append(f"{tier}: 사실 표에 없는 등급이라 해설 {1 + len(notes)}문장을 버립니다")
+            count = 1 + len(analysis) + len(notes)
+            total += count
+            dropped += count
+            reasons.append(f"{tier}: 사실 표에 없는 등급이라 해설 {count}문장을 버립니다")
             continue
         headline_ok = check(f"{tier}.headline", block.get("headline"))
+        kept_analysis = [
+            sentence for index, sentence in enumerate(analysis) if check(f"{tier}.analysis[{index}]", sentence)
+        ]
         kept = [
             note
             for index, note in enumerate(notes)
@@ -124,6 +129,7 @@ def verify(output: dict, facts: dict, heroes: dict[str, dict]) -> tuple[dict | N
             continue
         result["tiers"][tier] = {
             "headline": block["headline"],
+            "analysis": [{"text": a["text"], "cites": a["cites"]} for a in kept_analysis],
             "notes": [{"hero": n["hero"], "text": n["text"], "cites": n["cites"]} for n in kept],
         }
 

@@ -446,6 +446,9 @@ async function renderAnalysis() {
     html += `<section class="an-commentary">
       ${commentaryLine(commentary.overview, 'an-overview')}
       ${tierCommentary ? commentaryLine(tierCommentary.headline, 'an-headline') : ''}
+      ${tierCommentary && tierCommentary.analysis && tierCommentary.analysis.length
+        ? commentaryLine({ text: tierCommentary.analysis.map((sentence) => sentence.text).join(' ') }, 'an-analysis')
+        : ''}
       ${tierCommentary ? '' : `<p class="fine">${escapeHtml(tierName)} 자동 해설은 없습니다.</p>`}
     </section>`;
   } else {
