@@ -161,7 +161,7 @@ function renderMaps(shard) {
       for (const role of roles) {
         const rows = ranked(mapStats, role).slice(0, limit);
         if (!rows.length) continue;
-        html += `<div class="role-block"><div class="role-name role-${escapeHtml(role)}">${escapeHtml(roleLabel(role))}</div>`;
+        html += `<div class="role-block role-${escapeHtml(role)}"><div class="role-name">${escapeHtml(roleLabel(role))}</div>`;
         for (const row of rows) {
           html += `<div class="hero-row">
             ${portrait(row.hero)}
@@ -227,7 +227,7 @@ function renderRanking(shard) {
   }
   html += `</tr></thead><tbody>`;
   for (const row of rows) {
-    html += `<tr>
+    html += `<tr class="role-${escapeHtml(row.hero.role)}">
       <td class="hero-cell">${portrait(row.hero)}
         <span>${escapeHtml(row.name)}</span>
         <span class="role-tag">${escapeHtml(roleLabel(row.hero.role))}</span>${warnFlag(row.stats)}</td>
@@ -465,7 +465,7 @@ async function renderAnalysis() {
   html += `<h2 class="mode-title">${first ? '최근 패치에서 바뀐 영웅' : '구간 사이 패치에서 바뀐 영웅'}</h2>`;
   if (!changed.length) html += `<p class="fine">바뀐 영웅이 없습니다.</p>`;
   for (const group of byRole(changed)) {
-    html += `<div class="an-role"><div class="role-name role-${escapeHtml(group.role)}">${escapeHtml(roleLabel(group.role))}</div>
+    html += `<div class="an-role role-${escapeHtml(group.role)}"><div class="role-name">${escapeHtml(roleLabel(group.role))}</div>
       ${group.rows.map((row) => heroCard(row, analysis, notesOf(row.hero))).join('')}</div>`;
   }
 
